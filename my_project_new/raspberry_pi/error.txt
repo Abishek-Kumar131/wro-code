@@ -1,0 +1,7 @@
+rit@rit:~/Desktop/wro-code/my_project_new/raspberry_pi $ python open_challenge_R1.py
+Traceback (most recent call last):
+  File "/home/rit/Desktop/wro-code/my_project_new/raspberry_pi/open_challenge_R1.py", line 22, in <module>
+    from open_challenge_R1 import CameraManager
+  File "/home/rit/Desktop/wro-code/my_project_new/raspberry_pi/open_challenge_R1.py", line 22, in <module>
+    from open_challenge_R1 import CameraManager
+ImportError: cannot import name 'CameraManager' from partially initialized module 'open_challenge_R1' (most likely due to a circular import) (/home/rit/Desktop/wro-code/my_project_new/raspberry_pi/open_challenge_R1.py)
