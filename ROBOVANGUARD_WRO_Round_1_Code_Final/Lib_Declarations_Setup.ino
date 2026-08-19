@@ -18,8 +18,6 @@
 */
 
 #include <Wire.h>
-#include <Adafruit_TCS34725.h>
-#include <ESP32Servo.h>
 #include <NewPing.h>
 #include <FastLED.h>
 
@@ -30,14 +28,6 @@
 #define NUM_LEDS 1
 CRGB leds[NUM_LEDS];
 
-// Colour Sensor
-#define TCS3414CS_ADDRESS 0x29 //ColorSensor address 0x29
-
-// INTEGRATIONTIME - 2.4 - 614 ms | GAIN - 1x, 4x, 16x, 64x.
-Adafruit_TCS34725 tcs1 = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_2_4MS, TCS34725_GAIN_4X); // Initializing ColorSensor 
-
-int col_out;
-
 // DC Motor
 const int motorPin1 = 32; 
 const int motorPin2 = 33; 
@@ -45,12 +35,14 @@ const int motorPin2 = 33;
 const int dc_chan1 = 2;
 const int dc_chan2 = 3;
 const int nslp = 13; 
-const int frequency = 5000;
+const int frequency = 20000; // 20kHz inaudible ultrasonic PWM frequency (eliminates coil whine)
 
 
-// Servo Motor
+// Servo Motor (Hardware LEDC PWM - Channel 4, Timer 2 @ 50Hz)
 #define SERVO_PIN 27
-Servo servo;
+const int servo_chan = 4;     // Dedicated LEDC Channel 4 (isolated from DC motor channels 2 & 3)
+const int servo_freq = 50;    // Standard 50Hz servo refresh rate (20ms period)
+const int servo_res = 14;     // 14-bit resolution (0 - 16383)
 
 // Ultrasonic Sensors
 
@@ -92,33 +84,6 @@ void rgb_led(int r, int g, int b)
   FastLED.show();
 }
 
-// ColorSensor Function
-
-int front_colour_sensor() {
-  //TCA9548A(0);
-  uint16_t r, g, b, c;
-  tcs1.getRawData(&r, &g, &b, &c);
-  uint16_t colorTemp = tcs1.calculateColorTemperature(r, g, b);
-  //Serial.println("CS-1 Color Temp: "+ String(colorTemp));
-  //uint16_t lux = tcs1.calculateLux(r, g, b);
-  //Serial.println("Red: "+ String(r)+" Green: "+String(g)+" Blue: "+String(b)+" Clear: "+String(c));
-  
-
-  // Color Temp Condition
-  if((0 < colorTemp) && (colorTemp < orange_line_thold) && (colorTemp != 0)) // For Orange Line
-  {col_out = 1; } 
-
-  else if((colorTemp > blue_line_thold) && (colorTemp != 0)) // For Blue Line 
-  {col_out = 3;}
-  
-  else
-  {col_out = 0;}
-
-  return col_out;
-}
-
-
-
 // DC Motor Functions (Compatible with both ESP32 Core 2.x and Core 3.x)
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
 void motor_forward(int speed) {
@@ -153,13 +118,21 @@ void motor_stop() {
 #endif
 
 
-// Servo Functions
+// Servo Functions using Hardware LEDC (50Hz, 14-bit)
 void moveServoTo(int angle) {
-  // Constrain the angle between 0 and 180 degrees
-  angle = constrain(angle, 75, 125);
-  servo.write(angle);
-  //delay(15);
-  //Serial.println("Servo Angle : "+String(angle));
+  // Constrain the angle between safe mechanical limits (40 deg to 160 deg)
+  angle = constrain(angle, 40, 160);
+  // Map angle (0 - 180 deg) to standard servo pulse width (500us to 2400us)
+  long pulse_us = map(angle, 0, 180, 500, 2400);
+  // Convert pulse width (in microseconds) to 14-bit duty cycle at 50Hz (20,000us period):
+  // duty = (pulse_us * 16383) / 20000
+  long duty = (pulse_us * 16383) / 20000;
+
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  ledcWrite(SERVO_PIN, duty);
+#else
+  ledcWrite(servo_chan, duty);
+#endif
 }
 
 // Forward declarations for speeds and angles defined in main ino
@@ -226,10 +199,6 @@ void setup() {
   FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, NUM_LEDS);
   FastLED.clear();
   FastLED.show();
-
-  //######### Colour Sensor Setup #########//
-  analogReadResolution(12);       
-  analogSetAttenuation(ADC_0db);
   
   //######### DC Motor Setup ###########//
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
@@ -243,11 +212,21 @@ void setup() {
 #endif
   pinMode(nslp, OUTPUT);
   digitalWrite(nslp, HIGH);
+  motor_stop(); // Ensure motors start in completely silent stopped state
 
-  //######### Servo Motor Setup ###########//
+  //######### Servo Motor Setup (Dedicated Hardware LEDC Channel 4 @ 50Hz) ###########//
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  ledcAttach(SERVO_PIN, servo_freq, servo_res);
+#else
+  ledcSetup(servo_chan, servo_freq, servo_res);
+  ledcAttachPin(SERVO_PIN, servo_chan);
+#endif
 
-  servo.attach(SERVO_PIN, 500, 2400);
-  //initial servo angle
+  // Quick diagnostic wiggle on boot to visually confirm servo hardware operation
+  moveServoTo(servo_center - 20);
+  delay(250);
+  moveServoTo(servo_center + 20);
+  delay(250);
   moveServoTo(servo_center);
-  delay(500);
-  }
+  delay(250);
+}
