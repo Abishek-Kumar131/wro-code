@@ -4,9 +4,10 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 Hybrid Sensor-Vision Control Architecture:
-- Uses exact LAB color values & contour offset drawing routines from my_old_contour_colorvals_crt.py.
+- Uses LAB color thresholds from my_old_contour_colorvals_crt.py.
+- Directly compares Orange vs Blue line contour areas to dynamically determine track direction.
+- Allows forcing direction via CLI (--dir left / --dir right).
 - ESP32 handles high-frequency Side Ultrasonic Wall Centering (l_us & r_us).
-- Pi 5 Camera detects Floor Direction Markers (Blue/Orange) & Wall Ends.
 - Strict Trigger: Requires Marker Detection (lDetected == True) AND Wall Drop before triggering corner turn.
 """
 
@@ -28,6 +29,14 @@ def main():
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
+
+    # Check for direction override in arguments (--dir left or --dir right)
+    forced_dir = "none"
+    if "--dir" in sys.argv:
+        idx = sys.argv.index("--dir")
+        if idx + 1 < len(sys.argv):
+            forced_dir = sys.argv[idx + 1].lower()
+            print(f"[CONFIG] Forcing fixed track direction: {forced_dir.upper()}")
 
     # 1. Initialize USB Serial connection to ESP32
     serial_ctrl = WROSerialController()
@@ -73,7 +82,7 @@ def main():
 
     # 4. Safety Countdown before bot starts driving
     print("\n[READY] Hybrid Sensor-Vision Engine Ready!")
-    print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort)")
+    print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort, 'l'/'r' to set dir)")
     for c in range(3, 0, -1):
         print(f"[COUNTDOWN] {c}...")
         if show_monitor_display and warmup_frame is not None:
@@ -96,7 +105,7 @@ def main():
 
     # Navigation flags & state counters
     t = 0                  # Completed turn count (3 laps x 4 turns = 12)
-    turnDir = "none"       # Fixed turn direction ("left" or "right") once first floor line seen
+    turnDir = forced_dir   # Track direction ("left", "right", or "none")
     lDetected = False
     isTurning = False
     turnStartTime = 0
@@ -121,6 +130,8 @@ def main():
 
             leftArea = max_contour(cListLeft, ROI1)[0]
             rightArea = max_contour(cListRight, ROI2)[0]
+            orangeArea = max_contour(cListOrange, ROI3)[0]
+            blueArea = max_contour(cListBlue, ROI3)[0]
 
             # Get latest ultrasonic sensor telemetry from ESP32
             us_data = serial_ctrl.get_us_data()
@@ -129,17 +140,17 @@ def main():
             r_us = us_data.get("r", 0)
             b_us = us_data.get("b", 0)
 
-            # Detect floor markers (Orange = Clockwise / Right Turn, Blue = Counter-Clockwise / Left Turn)
-            if max_contour(cListOrange, ROI3)[0] > 100:
+            # Compare Orange vs Blue line contour areas directly
+            if orangeArea > 150 and orangeArea > blueArea:
                 lDetected = True
-                if turnDir == "none":
+                if forced_dir == "none":
                     turnDir = "right"
-                    print("[VISION MARKER] Detected ORANGE Line -> Set Track Direction = RIGHT (CW)")
-            elif max_contour(cListBlue, ROI3)[0] > 100:
+                print(f"[VISION MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Direction = RIGHT (CW)")
+            elif blueArea > 150 and blueArea > orangeArea:
                 lDetected = True
-                if turnDir == "none":
+                if forced_dir == "none":
                     turnDir = "left"
-                    print("[VISION MARKER] Detected BLUE Line -> Set Track Direction = LEFT (CCW)")
+                print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Direction = LEFT (CCW)")
 
             currTime = time.time()
 
@@ -156,7 +167,7 @@ def main():
                     turnCooldownUntil = currTime + 1.2  # 1.2s cooldown before next turn
                     serial_ctrl.send_command("FORWARD")
                     serial_ctrl.send_command("AUTO_US_ON")
-                    print(f"[NAV EVENT] Completed turn {t}/12. Re-enabled Side Ultrasonic Centering!")
+                    print(f"[NAV EVENT] Completed turn {t}/12 ({turnDir.upper()}). Re-enabled Side Ultrasonic Centering!")
             elif currTime >= turnCooldownUntil:
                 # Wall drop check
                 wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
@@ -164,7 +175,7 @@ def main():
                                    (turnDir == "right" and rightArea <= turnThresh)
 
                 # STRICT TRIGGER: Require line marker detection AND wall drop!
-                if lDetected and wallDropDetected:
+                if (lDetected or forced_dir != "none") and wallDropDetected:
                     targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
                     t += 1
                     print(f"[NAV EVENT] Marker + Wall End Detected! Triggering {targetTurnCmd} (Turn {t}/12)...")
@@ -189,7 +200,7 @@ def main():
 
             cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
             state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"US_CENTERING ({turnDir.upper()})"
-            telemetry_text = f"Cam: {cam_type} | State: {state_str} | Turns: {t}/12"
+            telemetry_text = f"Cam: {cam_type} | State: {state_str} | Turns: {t}/12 | O:{orangeArea} B:{blueArea}"
             us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
 
             cv2.putText(img_disp, telemetry_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
@@ -198,7 +209,7 @@ def main():
             # Update live web stream & snapshot
             streamer.update_frame(img_disp)
 
-            # Display directly on monitor screen
+            # Display directly on monitor screen & keyboard controls
             if show_monitor_display:
                 cv2.imshow(window_name, img_disp)
                 key = cv2.waitKey(1) & 0xFF
@@ -206,12 +217,20 @@ def main():
                     print("[USER INTERRUPT] Stopping bot from monitor GUI...")
                     serial_ctrl.send_command("STOP")
                     break
+                elif key == ord('l'):
+                    turnDir = "left"
+                    print("[KEYBOARD OVERRIDE] Direction set to LEFT")
+                elif key == ord('r'):
+                    turnDir = "right"
+                    print("[KEYBOARD OVERRIDE] Direction set to RIGHT")
 
             display_variables({
                 "Camera Type": cam_type,
                 "State": state_str,
                 "Track Dir": turnDir,
                 "Turn Count": f"{t}/12",
+                "Orange Area (px)": orangeArea,
+                "Blue Area (px)": blueArea,
                 "US Front (cm)": f_us,
                 "US Left (cm)": l_us,
                 "US Right (cm)": r_us,
