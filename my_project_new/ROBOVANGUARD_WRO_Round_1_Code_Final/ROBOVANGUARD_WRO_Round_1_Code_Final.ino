@@ -54,6 +54,7 @@ bool useSideUltrasonic = true;             // Enables/disables ESP32 ultrasonic 
 
 // Timed Arc Turn State Machine
 bool isTurning = false;
+bool last_cmd_was_left = false;
 unsigned long turnStartTime = 0;
 
 // Forward declarations for unified movement execution functions (in Lib_Declarations_Setup.ino)
@@ -86,21 +87,27 @@ void processCommand(String cmd) {
     execute_backward();
     Serial.println("ACK:BACKWARD");
   } else if (cmd == "LEFT" || cmd == "TURN_LEFT") {
-    isTurning = true;
-    turnStartTime = millis();
+    last_cmd_was_left = true;
+    if (!isTurning) {
+      isTurning = true;
+      turnStartTime = millis();
+      line_count++;
+      Serial.print("ACK:TURN_LEFT:COUNT:");
+      Serial.println(line_count);
+    }
     moveServoTo(left_turn_angle);
     motor_forward(turn_speed);
-    line_count++;
-    Serial.print("ACK:TURN_LEFT:COUNT:");
-    Serial.println(line_count);
   } else if (cmd == "RIGHT" || cmd == "TURN_RIGHT") {
-    isTurning = true;
-    turnStartTime = millis();
+    last_cmd_was_left = false;
+    if (!isTurning) {
+      isTurning = true;
+      turnStartTime = millis();
+      line_count++;
+      Serial.print("ACK:TURN_RIGHT:COUNT:");
+      Serial.println(line_count);
+    }
     moveServoTo(right_turn_angle);
     motor_forward(turn_speed);
-    line_count++;
-    Serial.print("ACK:TURN_RIGHT:COUNT:");
-    Serial.println(line_count);
   } else if (cmd == "STOP") {
     isTurning = false;
     execute_stop();
@@ -160,11 +167,10 @@ void checkSerialInput() {
 
 // Communication Failsafe Watchdog: automatically stops motors if no command received within timeout
 void checkFailsafe() {
-  if (serialControlActive) {
+  if (serialControlActive && !isTurning) {
     if (millis() - lastCommandTime > COMMAND_TIMEOUT) {
       execute_stop();
       serialControlActive = false;
-      isTurning = false;
     }
   }
 }
@@ -199,6 +205,13 @@ void loop() {
       moveServoTo(servo_center);
       motor_forward(normal_speed);
       Serial.println("ACK:TURN_COMPLETE");
+    } else {
+      // KEEP SERVO LOCKED AT TURN ANGLE THROUGHOUT TURN DURATION
+      if (last_cmd_was_left) {
+        moveServoTo(left_turn_angle);
+      } else {
+        moveServoTo(right_turn_angle);
+      }
     }
   } 
   // 3. Side Ultrasonic Centering (Active when driving forward and not executing a turn)

@@ -228,6 +228,10 @@ def main():
             # HYBRID CORNER TURN TRIGGERING (STRICT LINE + WALL DROP)
             # -------------------------------------------------------------
             if isTurning:
+                # Continuously stream active turn command to refresh ESP32 500ms watchdog & lock servo angle!
+                targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
+                serial_ctrl.send_command(targetTurnCmd)
+
                 if currTime - turnStartTime >= turnDuration:
                     isTurning = False
                     turnCooldownUntil = currTime + 1.2  # 1.2s cooldown before next turn
