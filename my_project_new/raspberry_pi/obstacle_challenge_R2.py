@@ -3,9 +3,10 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Obstacle Challenge Autonomous Navigation (Round 2)
 
-Adaptive Vision Engine for Narrow Field-of-View (Pi Camera v2):
-- Red/Green Pillar Tracking with Single-Wall & Dual-Wall Fallback.
-- Dynamic Steering Mode selection for narrow FoV cameras.
+Universal Camera Support:
+- Supports both Pi Camera v2 (Picamera2) AND standard USB Webcams (cv2.VideoCapture).
+- Auto-fallbacks to USB Webcam if Picamera2 is unavailable.
+- Can be forced to use USB Webcam with '--webcam' or '-w' flag.
 """
 
 import sys
@@ -13,11 +14,11 @@ import time
 import math
 import cv2
 import numpy as np
-from picamera2 import Picamera2
 from wro_serial import WROSerialController
 from masks import rMagenta, rRed, rGreen, rBlue, rOrange, rBlack, lotType
 from wro_functions import find_contours, max_contour, display_roi, display_variables
 from camera_streamer import CameraDebugStreamer
+from open_challenge_R1 import CameraManager
 
 
 class Pillar:
@@ -70,8 +71,10 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False):
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Narrow FoV Adaptive Pillar & Wall Steering Engine")
+    print("   Universal Camera Support (Picamera2 & USB Webcam)")
     print("=" * 65)
+
+    force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
 
     # 1. Initialize USB Serial connection to ESP32
     serial_ctrl = WROSerialController()
@@ -100,30 +103,26 @@ def main():
             print(f"[WARNING] Could not open GUI display window: {e}")
             show_monitor_display = False
 
-    # 3. Initialize Pi Camera v2 via Picamera2
-    print("[INFO] Initializing Picamera2...")
-    picam2 = Picamera2()
-    picam2.preview_configuration.main.size = (640, 480)
-    picam2.preview_configuration.main.format = "RGB888"
-    picam2.preview_configuration.controls.FrameRate = 30
-    picam2.preview_configuration.align()
-    picam2.configure("preview")
-    picam2.start()
-    print("[SUCCESS] Picamera2 started!")
+    # 3. Initialize Camera (Picamera2 or USB Webcam)
+    camera = CameraManager(force_webcam=force_webcam, device_index=0)
+    camera.start()
 
+    # Warmup camera frames
+    print("[INFO] Capturing camera warmup frames...")
     for _ in range(15):
-        warmup_frame = picam2.capture_array()
-        streamer.update_frame(warmup_frame)
-        if show_monitor_display:
-            cv2.imshow(window_name, warmup_frame)
-            cv2.waitKey(1)
+        warmup_frame = camera.capture_array()
+        if warmup_frame is not None:
+            streamer.update_frame(warmup_frame)
+            if show_monitor_display:
+                cv2.imshow(window_name, warmup_frame)
+                cv2.waitKey(1)
         time.sleep(0.04)
 
     print("\n[READY] Camera & Vision Engine Ready!")
     print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort)")
     for c in range(3, 0, -1):
         print(f"[COUNTDOWN] {c}...")
-        if show_monitor_display:
+        if show_monitor_display and warmup_frame is not None:
             cd_img = warmup_frame.copy()
             cv2.putText(cd_img, f"STARTING IN {c} SECONDS...", (50, 240),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
@@ -150,7 +149,11 @@ def main():
 
     try:
         while True:
-            img = picam2.capture_array()
+            img = camera.capture_array()
+            if img is None:
+                time.sleep(0.01)
+                continue
+
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
             img_lab = cv2.GaussianBlur(img_lab, (7, 7), 0)
 
@@ -171,9 +174,7 @@ def main():
             p_green = Pillar(0, 999, 0, 0, greenTarget)
             p_green, num_green = find_pillar(cListGreen, greenTarget, p_green, "green", ROI3)
 
-            # -------------------------------------------------------------
-            # ADAPTIVE STEERING SELECTION FOR NARROW FOV
-            # -------------------------------------------------------------
+            # Determine active steering target
             steer_angle = straightConst
 
             if p_red.area > 0 and p_red.dist < p_green.dist:
@@ -224,7 +225,8 @@ def main():
 
             img_disp = img.copy()
             img_disp = display_roi(img_disp, [ROI1, ROI2, ROI3])
-            telemetry_text = f"Mode: {navMode} | Steer: {steer_angle} | RedDist: {p_red.dist} | GreenDist: {p_green.dist}"
+            cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
+            telemetry_text = f"Cam: {cam_type} | Mode: {navMode} | Steer: {steer_angle} | RedDist: {p_red.dist}"
             cv2.putText(img_disp, telemetry_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
 
             streamer.update_frame(img_disp)
@@ -238,6 +240,7 @@ def main():
                     break
 
             display_variables({
+                "Camera Type": cam_type,
                 "Nav Mode": navMode,
                 "Red Dist": p_red.dist,
                 "Green Dist": p_green.dist,
@@ -252,6 +255,7 @@ def main():
     finally:
         serial_ctrl.send_command("STOP")
         streamer.stop()
+        camera.stop()
         time.sleep(0.1)
         serial_ctrl.disconnect()
         if show_monitor_display:

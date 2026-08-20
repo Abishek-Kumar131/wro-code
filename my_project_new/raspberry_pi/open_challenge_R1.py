@@ -3,29 +3,93 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
-Hybrid Sensor-Vision Control Architecture:
-- ESP32 handles high-frequency Side Ultrasonic Wall Centering (l_us & r_us).
-- Pi 5 Camera (Picamera2) detects Floor Direction Markers (Blue/Orange) & Wall Ends.
-- Requires both Line Detection (lDetected == True) AND Wall Drop before triggering corner turn.
-- Displays live Ultrasonic Sensor Readings (F, L, R, B) in terminal and OpenCV display.
+Universal Camera Support:
+- Supports both Pi Camera v2 (Picamera2) AND standard USB Webcams (cv2.VideoCapture).
+- Auto-fallbacks to USB Webcam if Picamera2 is unavailable.
+- Can be forced to use USB Webcam with '--webcam' or '-w' flag.
 """
 
 import sys
 import time
 import cv2
 import numpy as np
-from picamera2 import Picamera2
 from wro_serial import WROSerialController
 from masks import rOrange, rBlack, rBlue
 from wro_functions import find_contours, max_contour, display_roi, display_variables
 from camera_streamer import CameraDebugStreamer
 
 
+class CameraManager:
+    """Universal Camera abstraction supporting both Picamera2 and OpenCV USB Webcams."""
+
+    def __init__(self, force_webcam=False, device_index=0):
+        self.force_webcam = force_webcam
+        self.device_index = device_index
+        self.cap = None
+        self.picam2 = None
+        self.is_webcam = False
+
+    def start(self):
+        if self.force_webcam:
+            self._start_webcam()
+        else:
+            try:
+                from picamera2 import Picamera2
+                print("[INFO] Initializing Picamera2 (Pi CSI Camera)...")
+                self.picam2 = Picamera2()
+                self.picam2.preview_configuration.main.size = (640, 480)
+                self.picam2.preview_configuration.main.format = "RGB888"
+                self.picam2.preview_configuration.controls.FrameRate = 30
+                self.picam2.preview_configuration.align()
+                self.picam2.configure("preview")
+                self.picam2.start()
+                self.is_webcam = False
+                print("[SUCCESS] Picamera2 initialized!")
+            except Exception as e:
+                print(f"[INFO] Picamera2 not available ({e}). Switching to USB Webcam...")
+                self._start_webcam()
+
+    def _start_webcam(self):
+        print(f"[INFO] Initializing USB Webcam on /dev/video{self.device_index}...")
+        self.cap = cv2.VideoCapture(self.device_index)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.is_webcam = True
+
+        if not self.cap.isOpened():
+            print(f"[ERROR] Could not open USB Webcam on index {self.device_index}!", file=sys.stderr)
+        else:
+            print("[SUCCESS] USB Webcam initialized successfully!")
+
+    def capture_array(self):
+        if self.is_webcam:
+            if self.cap:
+                ret, frame = self.cap.read()
+                if ret and frame is not None:
+                    return frame
+            return None
+        else:
+            return self.picam2.capture_array()
+
+    def stop(self):
+        if self.is_webcam and self.cap:
+            self.cap.release()
+        elif self.picam2:
+            try:
+                self.picam2.stop()
+            except Exception:
+                pass
+
+
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Hybrid Architecture: ESP32 Side Ultrasonic + Pi 5 Vision Corners")
+    print("   Hybrid Architecture: ESP32 Side Ultrasonic + Vision Corners")
     print("=" * 65)
+
+    # Check for CLI flags
+    force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
 
     # 1. Initialize USB Serial connection to ESP32
     serial_ctrl = WROSerialController()
@@ -54,25 +118,19 @@ def main():
             print(f"[WARNING] Could not open GUI display window: {e}")
             show_monitor_display = False
 
-    # 3. Initialize Pi Camera v2 via Picamera2
-    print("[INFO] Initializing Picamera2...")
-    picam2 = Picamera2()
-    picam2.preview_configuration.main.size = (640, 480)
-    picam2.preview_configuration.main.format = "RGB888"
-    picam2.preview_configuration.controls.FrameRate = 30
-    picam2.preview_configuration.align()
-    picam2.configure("preview")
-    picam2.start()
-    print("[SUCCESS] Picamera2 started!")
+    # 3. Initialize Camera (Picamera2 or USB Webcam)
+    camera = CameraManager(force_webcam=force_webcam, device_index=0)
+    camera.start()
 
     # Warmup camera frames
     print("[INFO] Capturing camera warmup frames...")
     for _ in range(15):
-        warmup_frame = picam2.capture_array()
-        streamer.update_frame(warmup_frame)
-        if show_monitor_display:
-            cv2.imshow(window_name, warmup_frame)
-            cv2.waitKey(1)
+        warmup_frame = camera.capture_array()
+        if warmup_frame is not None:
+            streamer.update_frame(warmup_frame)
+            if show_monitor_display:
+                cv2.imshow(window_name, warmup_frame)
+                cv2.waitKey(1)
         time.sleep(0.04)
 
     # 4. Safety Countdown before bot starts driving
@@ -80,7 +138,7 @@ def main():
     print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort)")
     for c in range(3, 0, -1):
         print(f"[COUNTDOWN] {c}...")
-        if show_monitor_display:
+        if show_monitor_display and warmup_frame is not None:
             cd_img = warmup_frame.copy()
             cv2.putText(cd_img, f"STARTING IN {c} SECONDS...", (50, 240),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
@@ -110,7 +168,11 @@ def main():
 
     try:
         while True:
-            img = picam2.capture_array()
+            img = camera.capture_array()
+            if img is None:
+                time.sleep(0.01)
+                continue
+
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
             img_lab = cv2.GaussianBlur(img_lab, (7, 7), 0)
 
@@ -147,7 +209,6 @@ def main():
             # HYBRID CORNER TURN TRIGGERING (STRICT LINE + WALL DROP)
             # -------------------------------------------------------------
             if isTurning:
-                # Check if 2.0s turn duration has elapsed
                 if currTime - turnStartTime >= turnDuration:
                     isTurning = False
                     turnCooldownUntil = currTime + 1.2  # 1.2s cooldown before next turn
@@ -181,8 +242,9 @@ def main():
             cv2.drawContours(img_disp[ROI1[1]:ROI1[3], ROI1[0]:ROI1[2]], cListLeft, -1, (0, 255, 0), 2)
             cv2.drawContours(img_disp[ROI2[1]:ROI2[3], ROI2[0]:ROI2[2]], cListRight, -1, (0, 255, 0), 2)
 
+            cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
             state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"US_CENTERING ({turnDir.upper()})"
-            telemetry_text = f"State: {state_str} | Turns: {t}/12 | LineSeen: {lDetected}"
+            telemetry_text = f"Cam: {cam_type} | State: {state_str} | Turns: {t}/12"
             us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
 
             cv2.putText(img_disp, telemetry_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
@@ -201,10 +263,10 @@ def main():
                     break
 
             display_variables({
+                "Camera Type": cam_type,
                 "State": state_str,
                 "Track Dir": turnDir,
                 "Turn Count": f"{t}/12",
-                "Line Detected": lDetected,
                 "US Front (cm)": f_us,
                 "US Left (cm)": l_us,
                 "US Right (cm)": r_us,
@@ -225,6 +287,7 @@ def main():
     finally:
         serial_ctrl.send_command("STOP")
         streamer.stop()
+        camera.stop()
         time.sleep(0.1)
         serial_ctrl.disconnect()
         if show_monitor_display:
