@@ -1,0 +1,29 @@
+# Image formats & photo directories
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.webp
+*.tiff
+*.ico
+
+# Photo directories
+v-photos/
+t-photos/
+other/extra images/
+**/extra images/
+
+# Python & Environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# OS & IDE junk
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
