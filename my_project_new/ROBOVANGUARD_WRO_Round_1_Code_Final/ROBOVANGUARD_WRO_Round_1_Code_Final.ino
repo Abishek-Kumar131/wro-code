@@ -19,11 +19,11 @@ int line_chk_count = 12;  // Lap check threshold (3 laps x 4 turns = 12)
 int line_count = 0;
 
 //#---Bot Speeds & Timings---#############################################################
-int normal_speed = 200; // PWM (0-255)
-int turn_speed = 220;   // PWM (0-255)
+int normal_speed = 245; // PWM (0-255) - Increased for faster straightaway performance
+int turn_speed = 255;   // PWM (0-255) - Full 100% power during corner turns
 int turn_delay = 2000;  // ms (corner turn arc duration - 2.0s for full 90 deg turn)
-int fus_slow_speed = 180; // PWM
-int fus_slow_dist = 100;  // cm
+int fus_slow_speed = 220; // PWM (slowdown speed when approaching front wall)
+int fus_slow_dist = 80;   // cm (front wall distance threshold for slowdown)
 
 //#---Servo Angles (+-40 deg steering range)---###########################################
 int servo_center = 100;                  // 100 deg (Straight center)
@@ -122,6 +122,10 @@ void processCommand(String cmd) {
     turn_delay = cmd.substring(15).toInt();
     Serial.print("ACK:SET_TURN_DELAY:");
     Serial.println(turn_delay);
+  } else if (cmd.startsWith("SET_SPEED:")) {
+    normal_speed = constrain(cmd.substring(10).toInt(), 100, 255);
+    Serial.print("ACK:SET_SPEED:");
+    Serial.println(normal_speed);
   } else if (cmd.startsWith("STEER:")) {
     isTurning = false;
     int angle = cmd.substring(6).toInt();
