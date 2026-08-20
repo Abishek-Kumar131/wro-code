@@ -16,10 +16,9 @@ import cv2
 import numpy as np
 from wro_serial import WROSerialController
 from masks import rOrange, rBlack, rBlue
-from wro_functions import (find_contours, max_contour, draw_roi,
+from wro_functions import (CameraManager, find_contours, max_contour, draw_roi,
                            draw_offset_contours, display_variables)
 from camera_streamer import CameraDebugStreamer
-from open_challenge_R1 import CameraManager
 
 
 def main():

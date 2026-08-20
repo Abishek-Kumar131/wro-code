@@ -16,9 +16,7 @@ import cv2
 import numpy as np
 from wro_serial import WROSerialController
 from masks import rMagenta, rRed, rGreen, rBlue, rOrange, rBlack, lotType
-from wro_functions import find_contours, max_contour, display_roi, display_variables
-from camera_streamer import CameraDebugStreamer
-from open_challenge_R1 import CameraManager
+from wro_functions import CameraManager, find_contours, max_contour, display_roi, display_variables
 
 
 class Pillar:
