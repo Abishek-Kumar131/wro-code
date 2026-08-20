@@ -107,11 +107,11 @@ def main():
     kd = 0.006
 
     straightConst = 100  # ESP32 servo center (100 deg)
-    tDeviation = 20
+    tDeviation = 40
 
-    # Turn angle thresholds (ESP32 servo range: 40 to 160 deg)
-    sharpRight = straightConst + tDeviation  # 120 deg
-    sharpLeft = straightConst - tDeviation   # 80 deg
+    # Turn angle thresholds (ESP32 servo range: 60 to 140 deg for +-40 deg max steering)
+    sharpRight = straightConst + tDeviation  # 140 deg
+    sharpLeft = straightConst - tDeviation   # 60 deg
     maxRight = 140
     maxLeft = 60
 

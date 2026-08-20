@@ -29,8 +29,8 @@ int fus_slow_dist = 130;  // cm
 
 //#---Servo Angles---####################################################################
 int servo_center = 100;                 // 100 deg (Straight center)
-int left_turn_angle = servo_center - 20; // 80 deg (Left turn)
-int right_turn_angle = servo_center + 20;// 120 deg (Right turn)
+int left_turn_angle = servo_center - 40; // 60 deg (Left turn - 40 deg max steering)
+int right_turn_angle = servo_center + 40;// 140 deg (Right turn - 40 deg max steering)
 //#######################################################################################
 
 bool lt_st_count = 0;
