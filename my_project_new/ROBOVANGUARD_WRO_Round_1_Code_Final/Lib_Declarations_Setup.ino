@@ -168,6 +168,23 @@ void execute_stop() {
   moveServoTo(servo_center);
 }
 
+void execute_steer(int angle) {
+  moveServoTo(angle);
+  motor_forward(normal_speed);
+}
+
+void execute_drive(int speed, int angle) {
+  moveServoTo(angle);
+  if (speed > 0) {
+    motor_forward(speed);
+  } else if (speed < 0) {
+    motor_backward(-speed);
+  } else {
+    motor_stop();
+  }
+}
+
+
 
 // UltraSonic Function
 

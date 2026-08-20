@@ -141,11 +141,17 @@ class WROSerialController:
     def send_command(self, command: str) -> bool:
         """
         Sends a movement command to the ESP32.
-        Command is automatically capitalized and formatted with a trailing newline.
+        Command is automatically formatted with a trailing newline.
+        Supports: FORWARD, BACKWARD, LEFT, RIGHT, STOP, STEER:<angle>, DRIVE:<speed>:<angle>
         """
         cmd_clean = command.strip().upper()
-        if cmd_clean not in self.VALID_COMMANDS:
-            print(f"[ERROR] Invalid command '{command}'. Valid commands are: {self.VALID_COMMANDS}", file=sys.stderr)
+        is_valid = (
+            cmd_clean in self.VALID_COMMANDS
+            or cmd_clean.startswith("STEER:")
+            or cmd_clean.startswith("DRIVE:")
+        )
+        if not is_valid:
+            print(f"[ERROR] Invalid command '{command}'.", file=sys.stderr)
             return False
 
         message = f"{cmd_clean}\n".encode("utf-8")
@@ -169,6 +175,14 @@ class WROSerialController:
                         pass
                     self.serial_conn = None
                 return False
+
+    def send_steer(self, angle: int) -> bool:
+        """Sends continuous steering angle command (e.g. STEER:100)."""
+        return self.send_command(f"STEER:{int(angle)}")
+
+    def send_drive(self, speed: int, angle: int) -> bool:
+        """Sends drive command with speed and steering angle (e.g. DRIVE:200:100)."""
+        return self.send_command(f"DRIVE:{int(speed)}:{int(angle)}")
 
 
 # Global singleton controller instance for simple functional access

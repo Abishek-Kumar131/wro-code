@@ -57,6 +57,8 @@ void execute_backward();
 void execute_left();
 void execute_right();
 void execute_stop();
+void execute_steer(int angle);
+void execute_drive(int speed, int angle);
 
 // Process incoming command from Raspberry Pi 5 over USB Serial
 void processCommand(String cmd) {
@@ -82,6 +84,25 @@ void processCommand(String cmd) {
   } else if (cmd == "STOP") {
     execute_stop();
     Serial.println("ACK:STOP");
+  } else if (cmd.startsWith("STEER:")) {
+    int angle = cmd.substring(6).toInt();
+    execute_steer(angle);
+    Serial.print("ACK:STEER:");
+    Serial.println(angle);
+  } else if (cmd.startsWith("DRIVE:")) {
+    int firstColon = cmd.indexOf(':');
+    int secondColon = cmd.indexOf(':', firstColon + 1);
+    if (secondColon != -1) {
+      int speed = cmd.substring(firstColon + 1, secondColon).toInt();
+      int angle = cmd.substring(secondColon + 1).toInt();
+      execute_drive(speed, angle);
+      Serial.print("ACK:DRIVE:");
+      Serial.print(speed);
+      Serial.print(":");
+      Serial.println(angle);
+    } else {
+      Serial.println("ERROR:INVALID_DRIVE_FORMAT");
+    }
   } else {
     Serial.println("ERROR:UNKNOWN_COMMAND");
   }
