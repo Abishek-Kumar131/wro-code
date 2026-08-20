@@ -3,11 +3,10 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
-Architecture:
-- Raspberry Pi 5 runs OpenCV vision with Picamera2 (Pi Cam v2)
-- Computes PD wall centering & detects Orange/Blue corner markers
-- Streams commands over USB Serial to ESP32 controller (115200 baud)
-- ESP32 controls DC motor & steering servo with 500ms watchdog failsafe
+Bench Testing & Monitor Debug Mode:
+- Displays live OpenCV window ('WRO Open Challenge (Pi 5)') directly on attached monitor.
+- Live Web Camera Debug Streamer (http://<pi_ip>:8080) runs concurrently.
+- Press 'q' or 'ESC' in the window or terminal to stop bot immediately.
 """
 
 import sys
@@ -18,22 +17,44 @@ from picamera2 import Picamera2
 from wro_serial import WROSerialController
 from masks import rOrange, rBlack, rBlue
 from wro_functions import find_contours, max_contour, display_roi, display_variables
+from camera_streamer import CameraDebugStreamer
 
 
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
+    print("   Bench Testing Mode (Live Monitor Display ON)")
     print("=" * 65)
 
-    # Initialize USB Serial connection to ESP32
+    # 1. Initialize USB Serial connection to ESP32
     serial_ctrl = WROSerialController()
     if not serial_ctrl.connect():
         print("[ERROR] Cannot proceed without ESP32 serial connection.")
         sys.exit(1)
 
-    time.sleep(1.0)
+    # CRITICAL: Force immediate STOP on connect so bot does NOT move during setup!
+    print("[SAFETY] Forcing robot STOP state during initialization...")
+    serial_ctrl.send_command("STOP")
+    time.sleep(0.5)
 
-    # Initialize Pi Camera v2 via Picamera2
+    # 2. Start Live Web Camera Debug Streamer (port 8080)
+    streamer = CameraDebugStreamer(port=8080)
+    streamer.start()
+
+    # Enable monitor display window by default
+    show_monitor_display = "--no-display" not in sys.argv
+    window_name = "WRO Open Challenge - Monitor Debug View (Pi 5)"
+
+    if show_monitor_display:
+        try:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_name, 800, 600)
+            print("[DISPLAY] Created OpenCV live display window on monitor!")
+        except Exception as e:
+            print(f"[WARNING] Could not open GUI display window: {e}")
+            show_monitor_display = False
+
+    # 3. Initialize Pi Camera v2 via Picamera2
     print("[INFO] Initializing Picamera2...")
     picam2 = Picamera2()
     picam2.preview_configuration.main.size = (640, 480)
@@ -43,6 +64,33 @@ def main():
     picam2.configure("preview")
     picam2.start()
     print("[SUCCESS] Picamera2 started!")
+
+    # Capture warmup frames to stabilize exposure & show live camera feed on monitor
+    print("[INFO] Capturing camera warmup frames...")
+    for _ in range(15):
+        warmup_frame = picam2.capture_array()
+        streamer.update_frame(warmup_frame)
+        if show_monitor_display:
+            cv2.imshow(window_name, warmup_frame)
+            cv2.waitKey(1)
+        time.sleep(0.04)
+
+    # 4. Safety Countdown before bot starts driving
+    print("\n[READY] Camera & Vision Engine Ready!")
+    print("[COUNTDOWN] Bench testing bot starts driving in 3 seconds... (Press 'q' to abort)")
+    for c in range(3, 0, -1):
+        print(f"[COUNTDOWN] {c}...")
+        if show_monitor_display:
+            cd_img = warmup_frame.copy()
+            cv2.putText(cd_img, f"STARTING IN {c} SECONDS...", (50, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+            cv2.imshow(window_name, cd_img)
+            cv2.waitKey(1)
+        time.sleep(1.0)
+
+    # 5. Start robot driving forward ONLY AFTER countdown finishes!
+    print("[START] Driving FORWARD now!")
+    serial_ctrl.send_command("FORWARD")
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
     ROI1 = [20, 170, 240, 220]   # Left wall ROI
@@ -76,13 +124,7 @@ def main():
     prevDiff = 0
 
     lDetected = False
-    debug = "Debug" in sys.argv or "-d" in sys.argv
-    start = False
     turnDir = "none"
-
-    # Start robot driving forward
-    serial_ctrl.send_command("FORWARD")
-    time.sleep(0.5)
 
     try:
         while True:
@@ -117,7 +159,6 @@ def main():
             aDiff = rightArea - leftArea
 
             # Compute steering angle using PD control algorithm
-            # (Note: Positive aDiff means right wall is larger, so steer left -> decrease angle)
             angle = int(straightConst - (aDiff * kp + (aDiff - prevDiff) * kd))
             angle = max(maxLeft, min(maxRight, angle))
 
@@ -153,6 +194,36 @@ def main():
             prevDiff = aDiff
             prevAngle = angle
 
+            # Construct telemetry overlay for live monitor display
+            img_disp = img.copy()
+            img_disp = display_roi(img_disp, [ROI1, ROI2, ROI3])
+            cv2.drawContours(img_disp[ROI3[1]:ROI3[3], ROI3[0]:ROI3[2]], cListOrange, -1, (0, 255, 0), 2)
+            cv2.drawContours(img_disp[ROI1[1]:ROI1[3], ROI1[0]:ROI1[2]], cListLeft, -1, (0, 255, 0), 2)
+            cv2.drawContours(img_disp[ROI2[1]:ROI2[3], ROI2[0]:ROI2[2]], cListRight, -1, (0, 255, 0), 2)
+
+            telemetry_text = f"Steer: {angle} | L_Area: {leftArea} | R_Area: {rightArea} | Turns: {t}/12"
+            cv2.putText(img_disp, telemetry_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 204), 2)
+
+            # Update live web stream & snapshot
+            streamer.update_frame(img_disp)
+
+            # Display directly on monitor screen
+            if show_monitor_display:
+                cv2.imshow(window_name, img_disp)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q') or key == 27:  # 'q' or ESC
+                    print("[USER INTERRUPT] Stopping bot from monitor GUI...")
+                    serial_ctrl.send_command("STOP")
+                    break
+
+            display_variables({
+                "Left Area": leftArea,
+                "Right Area": rightArea,
+                "Steer Angle": angle,
+                "Turns": t,
+                "Marker Detected": lDetected
+            })
+
             # Stop after 3 full laps (12 turns)
             if t >= 12 and abs(angle - straightConst) <= 10:
                 print(f"[FINISH] Completed 12 turns (3 laps). Stopping bot!")
@@ -160,35 +231,16 @@ def main():
                 serial_ctrl.send_command("STOP")
                 break
 
-            # Debug display
-            if debug:
-                img_disp = display_roi(img, [ROI1, ROI2, ROI3])
-                cv2.drawContours(img_disp[ROI3[1]:ROI3[3], ROI3[0]:ROI3[2]], cListOrange, -1, (0, 255, 0), 2)
-                cv2.drawContours(img_disp[ROI1[1]:ROI1[3], ROI1[0]:ROI1[2]], cListLeft, -1, (0, 255, 0), 2)
-                cv2.drawContours(img_disp[ROI2[1]:ROI2[3], ROI2[0]:ROI2[2]], cListRight, -1, (0, 255, 0), 2)
-                cv2.imshow("WRO Open Challenge (Pi 5)", img_disp)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("[USER INTERRUPT] Stopping bot...")
-                    serial_ctrl.send_command("STOP")
-                    break
-
-                display_variables({
-                    "Left Area": leftArea,
-                    "Right Area": rightArea,
-                    "Steer Angle": angle,
-                    "Turns": t,
-                    "Marker Detected": lDetected
-                })
-
             time.sleep(0.02)  # 50 Hz vision loop
 
     except KeyboardInterrupt:
         print("\n[SAFETY] Keyboard Interrupt. Halting bot...")
     finally:
         serial_ctrl.send_command("STOP")
+        streamer.stop()
         time.sleep(0.1)
         serial_ctrl.disconnect()
-        if debug:
+        if show_monitor_display:
             cv2.destroyAllWindows()
 
 
