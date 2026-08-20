@@ -3,10 +3,11 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
-Universal Camera Support:
-- Supports both Pi Camera v2 (Picamera2) AND standard USB Webcams (cv2.VideoCapture).
-- Auto-fallbacks to USB Webcam if Picamera2 is unavailable.
-- Can be forced to use USB Webcam with '--webcam' or '-w' flag.
+Hybrid Sensor-Vision Control Architecture:
+- Uses exact LAB color values & contour offset drawing routines from my_old_contour_colorvals_crt.py.
+- ESP32 handles high-frequency Side Ultrasonic Wall Centering (l_us & r_us).
+- Pi 5 Camera detects Floor Direction Markers (Blue/Orange) & Wall Ends.
+- Strict Trigger: Requires Marker Detection (lDetected == True) AND Wall Drop before triggering corner turn.
 """
 
 import sys
@@ -15,99 +16,18 @@ import cv2
 import numpy as np
 from wro_serial import WROSerialController
 from masks import rOrange, rBlack, rBlue
-from wro_functions import find_contours, max_contour, display_roi, display_variables
+from wro_functions import (find_contours, max_contour, draw_roi,
+                           draw_offset_contours, display_variables)
 from camera_streamer import CameraDebugStreamer
-
-
-class CameraManager:
-    """Universal Camera abstraction supporting both Picamera2 and OpenCV USB Webcams."""
-
-    def __init__(self, force_webcam=False, device_index=0):
-        self.force_webcam = force_webcam
-        self.device_index = device_index
-        self.cap = None
-        self.picam2 = None
-        self.is_webcam = False
-
-    def start(self):
-        if self.force_webcam:
-            self._start_webcam()
-        else:
-            try:
-                from picamera2 import Picamera2
-                print("[INFO] Initializing Picamera2 (Pi CSI Camera)...")
-                self.picam2 = Picamera2()
-                self.picam2.preview_configuration.main.size = (640, 480)
-                self.picam2.preview_configuration.main.format = "RGB888"
-                self.picam2.preview_configuration.controls.FrameRate = 30
-                self.picam2.preview_configuration.align()
-                self.picam2.configure("preview")
-                self.picam2.start()
-                self.is_webcam = False
-                print("[SUCCESS] Picamera2 initialized!")
-            except Exception as e:
-                print(f"[INFO] Picamera2 not available ({e}). Switching to USB Webcam...")
-                self._start_webcam()
-
-    def _start_webcam(self):
-        search_indices = [self.device_index, 0, 1, 2, 3, 4, 5, 6, 8]
-        seen = set()
-        search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
-
-        for idx in search_indices:
-            print(f"[INFO] Testing USB Webcam index {idx}...")
-            for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-                try:
-                    cap = cv2.VideoCapture(idx, backend)
-                    if cap and cap.isOpened():
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                        
-                        # Test capture 1 frame to verify real webcam device
-                        for _ in range(3):
-                            ret, frame = cap.read()
-                            if ret and frame is not None and frame.size > 0:
-                                print(f"[SUCCESS] USB Webcam initialized on index {idx} (/dev/video{idx})!")
-                                self.cap = cap
-                                self.device_index = idx
-                                self.is_webcam = True
-                                return
-                        cap.release()
-                except Exception:
-                    pass
-
-        print("[ERROR] Could not find any working USB webcam across indices 0-8!", file=sys.stderr)
-        self.is_webcam = True
-        self.cap = None
-
-    def capture_array(self):
-        if self.is_webcam:
-            if self.cap:
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    return frame
-            return None
-        else:
-            return self.picam2.capture_array()
-
-    def stop(self):
-        if self.is_webcam and self.cap:
-            self.cap.release()
-        elif self.picam2:
-            try:
-                self.picam2.stop()
-            except Exception:
-                pass
+from open_challenge_R1 import CameraManager
 
 
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Hybrid Architecture: ESP32 Side Ultrasonic + Vision Corners")
+    print("   Hybrid Architecture: ESP32 Side Ultrasonic + Pi 5 Vision Corners")
     print("=" * 65)
 
-    # Check for CLI flags
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
 
     # 1. Initialize USB Serial connection to ESP32
@@ -170,10 +90,10 @@ def main():
     serial_ctrl.send_command("FORWARD")
     serial_ctrl.send_command("AUTO_US_ON")
 
-    # Regions of Interest (ROI) [x1, y1, x2, y2]
-    ROI1 = [10, 150, 260, 240]   # Left wall end ROI
-    ROI2 = [380, 150, 630, 240]  # Right wall end ROI
-    ROI3 = [200, 300, 440, 360]  # Ground indicator line ROI
+    # Regions of Interest (ROI) [x1, y1, x2, y2] (from my_old_contour_colorvals_crt.py)
+    ROI1 = [20, 170, 240, 220]   # Left wall ROI
+    ROI2 = [400, 170, 620, 220]  # Right wall ROI
+    ROI3 = [200, 300, 440, 350]  # Ground indicator line ROI
 
     # Navigation flags & state counters
     t = 0                  # Completed turn count (3 laps x 4 turns = 12)
@@ -193,8 +113,8 @@ def main():
                 continue
 
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
-            img_lab = cv2.GaussianBlur(img_lab, (7, 7), 0)
 
+            # Find contours using exact LAB color thresholds
             cListLeft = find_contours(img_lab, rBlack, ROI1)
             cListRight = find_contours(img_lab, rBlack, ROI2)
             cListOrange = find_contours(img_lab, rOrange, ROI3)
@@ -258,12 +178,15 @@ def main():
             if not isTurning:
                 serial_ctrl.send_command("FORWARD")
 
-            # Telemetry display overlay
+            # Draw ROIs & Offset Contours (matching my_old_contour_colorvals_crt.py)
             img_disp = img.copy()
-            img_disp = display_roi(img_disp, [ROI1, ROI2, ROI3])
-            cv2.drawContours(img_disp[ROI3[1]:ROI3[3], ROI3[0]:ROI3[2]], cListOrange, -1, (0, 255, 0), 2)
-            cv2.drawContours(img_disp[ROI1[1]:ROI1[3], ROI1[0]:ROI1[2]], cListLeft, -1, (0, 255, 0), 2)
-            cv2.drawContours(img_disp[ROI2[1]:ROI2[3], ROI2[0]:ROI2[2]], cListRight, -1, (0, 255, 0), 2)
+            draw_roi(img_disp, ROI1, (0, 255, 255), 2)
+            draw_roi(img_disp, ROI2, (0, 255, 255), 2)
+            draw_roi(img_disp, ROI3, (255, 255, 0), 2)
+            draw_offset_contours(img_disp, cListLeft, ROI1, (0, 255, 0), 2)
+            draw_offset_contours(img_disp, cListRight, ROI2, (0, 255, 0), 2)
+            draw_offset_contours(img_disp, cListOrange, ROI3, (0, 165, 255), 2)
+            draw_offset_contours(img_disp, cListBlue, ROI3, (255, 0, 0), 2)
 
             cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
             state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"US_CENTERING ({turnDir.upper()})"

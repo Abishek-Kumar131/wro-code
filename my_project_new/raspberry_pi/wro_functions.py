@@ -1,91 +1,75 @@
 """
 ROBOVANGUARD - WRO Future Engineers 2026
-Raspberry Pi 5 OpenCV Vision Functions
+Raspberry Pi 5 OpenCV Vision Functions & Drawing Helpers
+(Matching helpers & drawing routines from my_old_contour_colorvals_crt.py)
 """
 
 import cv2
 import numpy as np
-from masks import rMagenta, rBlack
+from masks import rBlack, rMagenta
 
 
-def display_roi(img, ROIs, color=(255, 204, 0)):
-    """Draws Region of Interest bounding boxes on image for visual debugging."""
-    for ROI in ROIs:
-        img = cv2.line(img, (ROI[0], ROI[1]), (ROI[2], ROI[1]), color, 4)
-        img = cv2.line(img, (ROI[0], ROI[1]), (ROI[0], ROI[3]), color, 4)
-        img = cv2.line(img, (ROI[2], ROI[3]), (ROI[2], ROI[1]), color, 4)
-        img = cv2.line(img, (ROI[2], ROI[3]), (ROI[0], ROI[3]), color, 4)
-    return img
+def morphology_clean(mask, ksize=5, iterations=1):
+    """Applies morphological close operation to filter noise."""
+    kernel = np.ones((ksize, ksize), np.uint8)
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=iterations)
 
 
-def find_contours(img_lab, lab_range, ROI):
-    """Segment an ROI in CIELAB color space and return external contours."""
-    # Segment image to ROI [x1, y1, x2, y2]
-    img_segmented = img_lab[ROI[1]:ROI[3], ROI[0]:ROI[2]]
+def find_contours(img_lab, lab_range, ROI, min_area=60):
+    """Segment an ROI in CIELAB color space, apply Gaussian blur & MORPH_CLOSE, returning filtered contours."""
+    x1, y1, x2, y2 = ROI
+    img_segmented = img_lab[y1:y2, x1:x2]
 
     lower_mask = np.array(lab_range[0], dtype=np.uint8)
     upper_mask = np.array(lab_range[1], dtype=np.uint8)
 
-    # Threshold image in LAB range
     mask = cv2.inRange(img_segmented, lower_mask, upper_mask)
+    mask = cv2.GaussianBlur(mask, (7, 7), 0)
+    mask = morphology_clean(mask, 5, 1)
 
-    kernel = np.ones((5, 5), np.uint8)
-
-    # Erosion and dilation to filter noise
-    eMask = cv2.erode(mask, kernel, iterations=1)
-    dMask = cv2.dilate(eMask, kernel, iterations=1)
-
-    # Find external contours
-    contours = cv2.findContours(dMask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
-    return contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [c for c in contours if cv2.contourArea(c) > min_area]
 
 
-def max_contour(contours, ROI):
-    """Returns [maxArea, maxX, maxY, maxContour] for the largest contour > 100 area in ROI."""
+def max_contour(contours, ROI=[0, 0, 0, 0]):
+    """Returns [maxArea, maxX, maxY, maxContour] for the largest contour in ROI."""
+    if not contours:
+        return [0, 0, 0, None]
+
     maxArea = 0
     maxY = 0
     maxX = 0
-    mCnt = 0
+    mCnt = None
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-
-        if area > 100:
+        if area > maxArea:
             approx = cv2.approxPolyDP(cnt, 0.01 * cv2.arcLength(cnt, True), True)
             x, y, w, h = cv2.boundingRect(approx)
-
-            # Map ROI coordinates back to full image coordinates
             x += ROI[0] + w // 2
             y += ROI[1] + h
-
-            if area > maxArea:
-                maxArea = area
-                maxY = y
-                maxX = x
-                mCnt = cnt
+            maxArea = int(area)
+            maxY = y
+            maxX = x
+            mCnt = cnt
 
     return [maxArea, maxX, maxY, mCnt]
 
 
-def pOverlap(img_lab, ROI, add=False):
-    """Handles black and magenta mask overlap for obstacle and parking lot detection."""
-    lower_black = np.array(rBlack[0], dtype=np.uint8)
-    upper_black = np.array(rBlack[1], dtype=np.uint8)
-    mask_black = cv2.inRange(img_lab[ROI[1]:ROI[3], ROI[0]:ROI[2]], lower_black, upper_black)
+def draw_roi(frame, roi, color=(0, 255, 255), thick=2):
+    """Draws ROI boundary rectangle on frame."""
+    x1, y1, x2, y2 = roi
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
 
-    lower_mag = np.array(rMagenta[0], dtype=np.uint8)
-    upper_mag = np.array(rMagenta[1], dtype=np.uint8)
-    mask_mag = cv2.inRange(img_lab[ROI[1]:ROI[3], ROI[0]:ROI[2]], lower_mag, upper_mag)
 
-    if not add:
-        mask = cv2.subtract(mask_black, cv2.bitwise_and(mask_black, mask_mag))
-    else:
-        mask = cv2.add(mask_black, mask_mag)
-
-    kernel = np.ones((5, 5), np.uint8)
-    eMask = cv2.erode(mask, kernel, iterations=1)
-    contours = cv2.findContours(eMask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
-    return contours
+def draw_offset_contours(frame, contours, roi, color, thick=2):
+    """Draws contours offset to their correct full-frame coordinates within ROI."""
+    if not contours:
+        return
+    x1, y1, _, _ = roi
+    offset = np.array([[x1, y1]], dtype=np.int32)
+    shifted = [cnt + offset for cnt in contours]
+    cv2.drawContours(frame, shifted, -1, color, thick)
 
 
 def display_variables(variables):
