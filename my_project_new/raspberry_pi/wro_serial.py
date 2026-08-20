@@ -27,7 +27,10 @@ except ImportError:
 class WROSerialController:
     """Manages physical USB serial communication between Raspberry Pi 5 and ESP32."""
 
-    VALID_COMMANDS = {"FORWARD", "BACKWARD", "LEFT", "RIGHT", "STOP"}
+    VALID_COMMANDS = {
+        "FORWARD", "BACKWARD", "LEFT", "RIGHT", "STOP",
+        "AUTO_US_ON", "AUTO_US_OFF", "TURN_LEFT", "TURN_RIGHT"
+    }
 
     def __init__(self, port: Optional[str] = None, baudrate: int = 115200, timeout: float = 0.1, auto_connect: bool = True):
         self.port = port
@@ -167,6 +170,7 @@ class WROSerialController:
             cmd_clean in self.VALID_COMMANDS
             or cmd_clean.startswith("STEER:")
             or cmd_clean.startswith("DRIVE:")
+            or cmd_clean.startswith("SET_")
         )
         if not is_valid:
             print(f"[ERROR] Invalid command '{command}'.", file=sys.stderr)
