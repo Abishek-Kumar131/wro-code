@@ -6,8 +6,8 @@ Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 Hybrid Sensor-Vision Control Architecture:
 - ESP32 handles high-frequency Side Ultrasonic Wall Centering (l_us & r_us).
 - Pi 5 Camera (Picamera2) detects Floor Direction Markers (Blue/Orange) & Wall Ends.
-- Pi 5 triggers TURN_LEFT / TURN_RIGHT commands to ESP32 at corner approach.
-- ESP32 temporarily pauses side ultrasonic centering during timed corner arc turns.
+- Requires both Line Detection (lDetected == True) AND Wall Drop before triggering corner turn.
+- Displays live Ultrasonic Sensor Readings (F, L, R, B) in terminal and OpenCV display.
 """
 
 import sys
@@ -105,6 +105,7 @@ def main():
     isTurning = False
     turnStartTime = 0
     turnCooldownUntil = 0
+    turnDuration = 2.0     # 2.0 seconds corner arc turn duration
     turnThresh = 150       # Area threshold below which wall end is detected
 
     try:
@@ -121,49 +122,53 @@ def main():
             leftArea = max_contour(cListLeft, ROI1)[0]
             rightArea = max_contour(cListRight, ROI2)[0]
 
+            # Get latest ultrasonic sensor telemetry from ESP32
+            us_data = serial_ctrl.get_us_data()
+            f_us = us_data.get("f", 0)
+            l_us = us_data.get("l", 0)
+            r_us = us_data.get("r", 0)
+            b_us = us_data.get("b", 0)
+
             # Detect floor markers (Orange = Clockwise / Right Turn, Blue = Counter-Clockwise / Left Turn)
             if max_contour(cListOrange, ROI3)[0] > 100:
                 lDetected = True
                 if turnDir == "none":
                     turnDir = "right"
-                    print("[VISION MARKER] Detected ORANGE Line -> Set Direction = RIGHT (CW)")
+                    print("[VISION MARKER] Detected ORANGE Line -> Set Track Direction = RIGHT (CW)")
             elif max_contour(cListBlue, ROI3)[0] > 100:
                 lDetected = True
                 if turnDir == "none":
                     turnDir = "left"
-                    print("[VISION MARKER] Detected BLUE Line -> Set Direction = LEFT (CCW)")
+                    print("[VISION MARKER] Detected BLUE Line -> Set Track Direction = LEFT (CCW)")
 
             currTime = time.time()
 
             # -------------------------------------------------------------
-            # HYBRID CORNER TURN TRIGGERING
+            # HYBRID CORNER TURN TRIGGERING (STRICT LINE + WALL DROP)
             # -------------------------------------------------------------
             if isTurning:
-                # Check if 1.4s turn duration has elapsed
-                if currTime - turnStartTime >= 1.4:
+                # Check if 2.0s turn duration has elapsed
+                if currTime - turnStartTime >= turnDuration:
                     isTurning = False
-                    turnCooldownUntil = currTime + 1.0  # 1.0s cooldown before next turn trigger
+                    turnCooldownUntil = currTime + 1.2  # 1.2s cooldown before next turn
                     serial_ctrl.send_command("FORWARD")
                     serial_ctrl.send_command("AUTO_US_ON")
                     print(f"[NAV EVENT] Completed turn {t}/12. Re-enabled Side Ultrasonic Centering!")
             elif currTime >= turnCooldownUntil:
-                # Check for wall end / corner opening
+                # Wall drop check
                 wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
                                    (turnDir == "left" and leftArea <= turnThresh) or \
                                    (turnDir == "right" and rightArea <= turnThresh)
 
-                if wallDropDetected:
-                    if turnDir == "left" or (turnDir == "none" and leftArea <= rightArea):
-                        targetTurnCmd = "TURN_LEFT"
-                    else:
-                        targetTurnCmd = "TURN_RIGHT"
-
-                    print(f"[NAV EVENT] Wall end detected! Triggering {targetTurnCmd}...")
+                # STRICT TRIGGER: Require line marker detection AND wall drop!
+                if lDetected and wallDropDetected:
+                    targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
+                    t += 1
+                    print(f"[NAV EVENT] Marker + Wall End Detected! Triggering {targetTurnCmd} (Turn {t}/12)...")
                     serial_ctrl.send_command(targetTurnCmd)
                     isTurning = True
                     turnStartTime = currTime
-                    t += 1
-                    lDetected = False
+                    lDetected = False  # Reset marker flag until next line is seen!
 
             # Keep 500ms serial watchdog refreshed when driving straight
             if not isTurning:
@@ -177,8 +182,11 @@ def main():
             cv2.drawContours(img_disp[ROI2[1]:ROI2[3], ROI2[0]:ROI2[2]], cListRight, -1, (0, 255, 0), 2)
 
             state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"US_CENTERING ({turnDir.upper()})"
-            telemetry_text = f"State: {state_str} | L: {leftArea} | R: {rightArea} | Turns: {t}/12"
-            cv2.putText(img_disp, telemetry_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
+            telemetry_text = f"State: {state_str} | Turns: {t}/12 | LineSeen: {lDetected}"
+            us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
+
+            cv2.putText(img_disp, telemetry_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
+            cv2.putText(img_disp, us_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
 
             # Update live web stream & snapshot
             streamer.update_frame(img_disp)
@@ -195,10 +203,12 @@ def main():
             display_variables({
                 "State": state_str,
                 "Track Dir": turnDir,
-                "Left Area": leftArea,
-                "Right Area": rightArea,
-                "Turns": t,
-                "Marker Detected": lDetected
+                "Turn Count": f"{t}/12",
+                "Line Detected": lDetected,
+                "US Front (cm)": f_us,
+                "US Left (cm)": l_us,
+                "US Right (cm)": r_us,
+                "US Back (cm)": b_us
             })
 
             # Stop after 3 full laps (12 turns)

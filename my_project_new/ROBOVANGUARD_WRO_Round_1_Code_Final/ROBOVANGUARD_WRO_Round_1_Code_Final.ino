@@ -12,15 +12,16 @@
   - Ultrasonic Side-Wall Centering running on ESP32 at high rate.
   - Pi 5 Vision triggers Turn Directions (TURN_LEFT / TURN_RIGHT / STOP).
   - Pauses Side Ultrasonic Centering during timed corner arc turns.
+  - Periodic USB Serial Telemetry for Ultrasonic Sensors (US:F:..,L:..,R:..,B:..).
 */
 
 int line_chk_count = 12;  // Lap check threshold (3 laps x 4 turns = 12)
 int line_count = 0;
 
-//#---Bot Speeds---######################################################################
+//#---Bot Speeds & Timings---#############################################################
 int normal_speed = 200; // PWM (0-255)
 int turn_speed = 220;   // PWM (0-255)
-int turn_delay = 1300;  // ms (corner turn arc duration)
+int turn_delay = 2000;  // ms (corner turn arc duration - 2.0s for full 90 deg turn)
 int fus_slow_speed = 180; // PWM
 int fus_slow_dist = 100;  // cm
 
@@ -46,6 +47,7 @@ bool DPDT_STATE = 0; // 0 False state.
 // ########### USB Serial Command & Failsafe Definitions #################################//
 String serialCommandBuffer = "";
 unsigned long lastCommandTime = 0;
+unsigned long lastTelemetryTime = 0;
 const unsigned long COMMAND_TIMEOUT = 500; // 500ms failsafe timeout
 bool serialControlActive = false;
 bool useSideUltrasonic = true;             // Enables/disables ESP32 ultrasonic centering
@@ -109,6 +111,10 @@ void processCommand(String cmd) {
   } else if (cmd == "AUTO_US_OFF") {
     useSideUltrasonic = false;
     Serial.println("ACK:AUTO_US_OFF");
+  } else if (cmd.startsWith("SET_TURN_DELAY:")) {
+    turn_delay = cmd.substring(15).toInt();
+    Serial.print("ACK:SET_TURN_DELAY:");
+    Serial.println(turn_delay);
   } else if (cmd.startsWith("STEER:")) {
     isTurning = false;
     int angle = cmd.substring(6).toInt();
@@ -163,10 +169,28 @@ void checkFailsafe() {
   }
 }
 
+void sendUltrasonicTelemetry() {
+  if (millis() - lastTelemetryTime >= 100) {
+    lastTelemetryTime = millis();
+    Serial.print("US:F:");
+    Serial.print(f_us);
+    Serial.print(",L:");
+    Serial.print(l_us);
+    Serial.print(",R:");
+    Serial.print(r_us);
+    Serial.print(",B:");
+    Serial.println(b_us);
+  }
+}
+
 void loop() {
+  // Read ultrasonic sensors
+  US_Values(f_us, f1_us, f2_us, b_us, l_us, r_us);
+
   // 1. Process USB Serial commands from Raspberry Pi 5
   checkSerialInput();
   checkFailsafe();
+  sendUltrasonicTelemetry();
 
   // 2. Timed Arc Turn Non-Blocking Update
   if (isTurning) {
@@ -179,7 +203,6 @@ void loop() {
   } 
   // 3. Side Ultrasonic Centering (Active when driving forward and not executing a turn)
   else if (serialControlActive && useSideUltrasonic) {
-    US_Values(f_us, f1_us, f2_us, b_us, l_us, r_us);
     side_us_logic_fun();
   }
   // 4. Standalone Autonomous DPDT Logic (when Pi 5 is not connected)
@@ -187,8 +210,6 @@ void loop() {
     DPDT_STATE = digitalRead(DPDT_Push_Button_Pin);
 
     if (DPDT_STATE == 1) { 
-      US_Values(f_us, f1_us, f2_us, b_us, l_us, r_us);
-
       if (LOGIC_LOCK == 1) { 
         side_us_logic_fun();
       }

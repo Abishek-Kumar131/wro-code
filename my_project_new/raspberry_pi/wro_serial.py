@@ -39,6 +39,7 @@ class WROSerialController:
         self._rx_thread: Optional[threading.Thread] = None
         self.last_ack: Optional[str] = None
         self.on_ack_callback: Optional[Callable[[str], None]] = None
+        self.us_data = {"f": 0, "l": 0, "r": 0, "b": 0}
 
         if auto_connect:
             self.connect()
@@ -120,6 +121,21 @@ class WROSerialController:
                 self.serial_conn = None
         print("[INFO] USB Serial disconnected.")
 
+    def _parse_us_telemetry(self, line: str):
+        """Parses ESP32 US telemetry line (e.g. US:F:45,L:28,R:31,B:80)."""
+        try:
+            parts = line[3:].split(",")
+            for p in parts:
+                k, v = p.split(":")
+                k_clean = k.strip().lower()
+                self.us_data[k_clean] = int(v.strip())
+        except Exception:
+            pass
+
+    def get_us_data(self) -> dict:
+        """Returns the latest parsed ultrasonic telemetry dictionary."""
+        return self.us_data
+
     def _read_loop(self):
         """Background thread for asynchronous reading of ACKs and telemetry."""
         while self.is_running:
@@ -129,9 +145,11 @@ class WROSerialController:
                         line = self.serial_conn.readline().decode("utf-8", errors="replace").strip()
                         if line:
                             self.last_ack = line
+                            if line.startswith("US:"):
+                                self._parse_us_telemetry(line)
                             if self.on_ack_callback:
                                 self.on_ack_callback(line)
-                            else:
+                            elif not line.startswith("US:"):
                                 print(f"[ESP32 >> RPi5]: {line}")
                 time.sleep(0.01)
             except Exception as e:
