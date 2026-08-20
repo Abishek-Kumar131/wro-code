@@ -6,7 +6,8 @@ Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 Hybrid Sensor-Vision Control Architecture:
 - Uses LAB color thresholds from my_old_contour_colorvals_crt.py.
 - Directly compares Orange vs Blue line contour areas to dynamically determine track direction.
-- Allows forcing direction via CLI (--dir left / --dir right).
+- Enforces a 5.0-second Line Detection Lockout after any line is detected or turn is triggered,
+  preventing mid-turn or double-turn false triggers.
 - ESP32 handles high-frequency Side Ultrasonic Wall Centering (l_us & r_us).
 - Strict Trigger: Requires Marker Detection (lDetected == True) AND Wall Drop before triggering corner turn.
 """
@@ -110,6 +111,7 @@ def main():
     isTurning = False
     turnStartTime = 0
     turnCooldownUntil = 0
+    lineCooldownUntil = 0  # 5.0s lockout timer to prevent mid-turn line detection
     turnDuration = 2.0     # 2.0 seconds corner arc turn duration
     turnThresh = 150       # Area threshold below which wall end is detected
 
@@ -120,6 +122,7 @@ def main():
                 time.sleep(0.01)
                 continue
 
+            currTime = time.time()
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
 
             # Find contours using exact LAB color thresholds
@@ -140,19 +143,22 @@ def main():
             r_us = us_data.get("r", 0)
             b_us = us_data.get("b", 0)
 
-            # Compare Orange vs Blue line contour areas directly
-            if orangeArea > 150 and orangeArea > blueArea:
-                lDetected = True
-                if forced_dir == "none":
-                    turnDir = "right"
-                print(f"[VISION MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Direction = RIGHT (CW)")
-            elif blueArea > 150 and blueArea > orangeArea:
-                lDetected = True
-                if forced_dir == "none":
-                    turnDir = "left"
-                print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Direction = LEFT (CCW)")
-
-            currTime = time.time()
+            # -------------------------------------------------------------
+            # LINE MARKER DETECTION WITH 5.0-SECOND LOCKOUT COOLDOWN
+            # -------------------------------------------------------------
+            if currTime >= lineCooldownUntil and not isTurning:
+                if orangeArea > 150 and orangeArea > blueArea:
+                    lDetected = True
+                    if forced_dir == "none":
+                        turnDir = "right"
+                    lineCooldownUntil = currTime + 5.0  # 5.0s lockout after line detection!
+                    print(f"[VISION MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT. (5s Line Lockout Active)")
+                elif blueArea > 150 and blueArea > orangeArea:
+                    lDetected = True
+                    if forced_dir == "none":
+                        turnDir = "left"
+                    lineCooldownUntil = currTime + 5.0  # 5.0s lockout after line detection!
+                    print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT. (5s Line Lockout Active)")
 
             # -------------------------------------------------------------
             # HYBRID CORNER TURN TRIGGERING (STRICT LINE + WALL DROP)
@@ -164,7 +170,7 @@ def main():
 
                 if currTime - turnStartTime >= turnDuration:
                     isTurning = False
-                    turnCooldownUntil = currTime + 1.2  # 1.2s cooldown before next turn
+                    turnCooldownUntil = currTime + 2.0  # 2.0s cooldown before next turn trigger
                     serial_ctrl.send_command("FORWARD")
                     serial_ctrl.send_command("AUTO_US_ON")
                     print(f"[NAV EVENT] Completed turn {t}/12 ({turnDir.upper()}). Re-enabled Side Ultrasonic Centering!")
@@ -183,6 +189,7 @@ def main():
                     isTurning = True
                     turnStartTime = currTime
                     lDetected = False  # Reset marker flag until next line is seen!
+                    lineCooldownUntil = currTime + 5.0  # Lockout line detection for 5.0s from turn start!
 
             # Keep 500ms serial watchdog refreshed when driving straight
             if not isTurning:
@@ -199,8 +206,10 @@ def main():
             draw_offset_contours(img_disp, cListBlue, ROI3, (255, 0, 0), 2)
 
             cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
+            lockout_rem = max(0.0, round(lineCooldownUntil - currTime, 1))
+            lockout_str = f"LOCKED ({lockout_rem}s)" if lockout_rem > 0 else "ACTIVE"
             state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"US_CENTERING ({turnDir.upper()})"
-            telemetry_text = f"Cam: {cam_type} | State: {state_str} | Turns: {t}/12 | O:{orangeArea} B:{blueArea}"
+            telemetry_text = f"Cam: {cam_type} | State: {state_str} | Turns: {t}/12 | LineSense: {lockout_str}"
             us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
 
             cv2.putText(img_disp, telemetry_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
@@ -229,6 +238,7 @@ def main():
                 "State": state_str,
                 "Track Dir": turnDir,
                 "Turn Count": f"{t}/12",
+                "Line Lockout": lockout_str,
                 "Orange Area (px)": orangeArea,
                 "Blue Area (px)": blueArea,
                 "US Front (cm)": f_us,
