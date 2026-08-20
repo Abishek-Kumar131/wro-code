@@ -3,10 +3,11 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
-Bench Testing & Monitor Debug Mode:
-- Displays live OpenCV window ('WRO Open Challenge (Pi 5)') directly on attached monitor.
-- Live Web Camera Debug Streamer (http://<pi_ip>:8080) runs concurrently.
-- Press 'q' or 'ESC' in the window or terminal to stop bot immediately.
+Hybrid Sensor-Vision Control Architecture:
+- ESP32 handles high-frequency Side Ultrasonic Wall Centering (l_us & r_us).
+- Pi 5 Camera (Picamera2) detects Floor Direction Markers (Blue/Orange) & Wall Ends.
+- Pi 5 triggers TURN_LEFT / TURN_RIGHT commands to ESP32 at corner approach.
+- ESP32 temporarily pauses side ultrasonic centering during timed corner arc turns.
 """
 
 import sys
@@ -23,7 +24,7 @@ from camera_streamer import CameraDebugStreamer
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Bench Testing Mode (Live Monitor Display ON)")
+    print("   Hybrid Architecture: ESP32 Side Ultrasonic + Pi 5 Vision Corners")
     print("=" * 65)
 
     # 1. Initialize USB Serial connection to ESP32
@@ -32,7 +33,7 @@ def main():
         print("[ERROR] Cannot proceed without ESP32 serial connection.")
         sys.exit(1)
 
-    # CRITICAL: Force immediate STOP on connect so bot does NOT move during setup!
+    # Force immediate STOP during startup
     print("[SAFETY] Forcing robot STOP state during initialization...")
     serial_ctrl.send_command("STOP")
     time.sleep(0.5)
@@ -41,9 +42,8 @@ def main():
     streamer = CameraDebugStreamer(port=8080)
     streamer.start()
 
-    # Enable monitor display window by default
     show_monitor_display = "--no-display" not in sys.argv
-    window_name = "WRO Open Challenge - Monitor Debug View (Pi 5)"
+    window_name = "WRO Open Challenge - Hybrid Monitor Debug (Pi 5)"
 
     if show_monitor_display:
         try:
@@ -65,7 +65,7 @@ def main():
     picam2.start()
     print("[SUCCESS] Picamera2 started!")
 
-    # Capture warmup frames to stabilize exposure & show live camera feed on monitor
+    # Warmup camera frames
     print("[INFO] Capturing camera warmup frames...")
     for _ in range(15):
         warmup_frame = picam2.capture_array()
@@ -76,8 +76,8 @@ def main():
         time.sleep(0.04)
 
     # 4. Safety Countdown before bot starts driving
-    print("\n[READY] Camera & Vision Engine Ready!")
-    print("[COUNTDOWN] Bench testing bot starts driving in 3 seconds... (Press 'q' to abort)")
+    print("\n[READY] Hybrid Sensor-Vision Engine Ready!")
+    print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort)")
     for c in range(3, 0, -1):
         print(f"[COUNTDOWN] {c}...")
         if show_monitor_display:
@@ -88,121 +88,97 @@ def main():
             cv2.waitKey(1)
         time.sleep(1.0)
 
-    # 5. Start robot driving forward ONLY AFTER countdown finishes!
-    print("[START] Driving FORWARD now!")
+    # 5. Start robot driving forward & enable ESP32 side ultrasonic wall-centering!
+    print("[START] Driving FORWARD & Enabling ESP32 Side Ultrasonic Centering!")
     serial_ctrl.send_command("FORWARD")
+    serial_ctrl.send_command("AUTO_US_ON")
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
-    ROI1 = [20, 170, 240, 220]   # Left wall ROI
-    ROI2 = [400, 170, 620, 220]  # Right wall ROI
-    ROI3 = [200, 300, 440, 350]  # Ground indicator line ROI
+    ROI1 = [10, 150, 260, 240]   # Left wall end ROI
+    ROI2 = [380, 150, 630, 240]  # Right wall end ROI
+    ROI3 = [200, 300, 440, 360]  # Ground indicator line ROI
 
     # Navigation flags & state counters
-    lTurn = False
-    rTurn = False
-    t = 0  # Completed turn count
-
-    # Control parameters
-    kp = 0.02
-    kd = 0.006
-
-    straightConst = 100  # ESP32 servo center (100 deg)
-    tDeviation = 40
-
-    # Turn angle thresholds (ESP32 servo range: 60 to 140 deg for +-40 deg max steering)
-    sharpRight = straightConst + tDeviation  # 140 deg
-    sharpLeft = straightConst - tDeviation   # 60 deg
-    maxRight = 140
-    maxLeft = 60
-
-    turnThresh = 150   # Area below which turn begins
-    exitThresh = 1500  # Area above which turn ends
-
-    angle = straightConst
-    prevAngle = angle
-    aDiff = 0
-    prevDiff = 0
-
+    t = 0                  # Completed turn count (3 laps x 4 turns = 12)
+    turnDir = "none"       # Fixed turn direction ("left" or "right") once first floor line seen
     lDetected = False
-    turnDir = "none"
+    isTurning = False
+    turnStartTime = 0
+    turnCooldownUntil = 0
+    turnThresh = 150       # Area threshold below which wall end is detected
 
     try:
         while True:
-            # Capture frame from Pi Camera v2
             img = picam2.capture_array()
-
-            # Convert BGR to LAB color space
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
             img_lab = cv2.GaussianBlur(img_lab, (7, 7), 0)
 
-            # Find contours for left/right walls & orange/blue floor lines
             cListLeft = find_contours(img_lab, rBlack, ROI1)
             cListRight = find_contours(img_lab, rBlack, ROI2)
             cListOrange = find_contours(img_lab, rOrange, ROI3)
             cListBlue = find_contours(img_lab, rBlue, ROI3)
 
-            # Calculate wall contour areas
             leftArea = max_contour(cListLeft, ROI1)[0]
             rightArea = max_contour(cListRight, ROI2)[0]
 
-            # Detect orange/blue corner marker lines
+            # Detect floor markers (Orange = Clockwise / Right Turn, Blue = Counter-Clockwise / Left Turn)
             if max_contour(cListOrange, ROI3)[0] > 100:
                 lDetected = True
                 if turnDir == "none":
                     turnDir = "right"
+                    print("[VISION MARKER] Detected ORANGE Line -> Set Direction = RIGHT (CW)")
             elif max_contour(cListBlue, ROI3)[0] > 100:
                 lDetected = True
                 if turnDir == "none":
                     turnDir = "left"
+                    print("[VISION MARKER] Detected BLUE Line -> Set Direction = LEFT (CCW)")
 
-            # Calculate area difference for wall centering
-            aDiff = rightArea - leftArea
+            currTime = time.time()
 
-            # Compute steering angle using PD control algorithm
-            angle = int(straightConst - (aDiff * kp + (aDiff - prevDiff) * kd))
-            angle = max(maxLeft, min(maxRight, angle))
+            # -------------------------------------------------------------
+            # HYBRID CORNER TURN TRIGGERING
+            # -------------------------------------------------------------
+            if isTurning:
+                # Check if 1.4s turn duration has elapsed
+                if currTime - turnStartTime >= 1.4:
+                    isTurning = False
+                    turnCooldownUntil = currTime + 1.0  # 1.0s cooldown before next turn trigger
+                    serial_ctrl.send_command("FORWARD")
+                    serial_ctrl.send_command("AUTO_US_ON")
+                    print(f"[NAV EVENT] Completed turn {t}/12. Re-enabled Side Ultrasonic Centering!")
+            elif currTime >= turnCooldownUntil:
+                # Check for wall end / corner opening
+                wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
+                                   (turnDir == "left" and leftArea <= turnThresh) or \
+                                   (turnDir == "right" and rightArea <= turnThresh)
 
-            # Turn triggering logic
-            if leftArea <= turnThresh and not rTurn:
-                lTurn = True
-            elif rightArea <= turnThresh and not lTurn:
-                rTurn = True
+                if wallDropDetected:
+                    if turnDir == "left" or (turnDir == "none" and leftArea <= rightArea):
+                        targetTurnCmd = "TURN_LEFT"
+                    else:
+                        targetTurnCmd = "TURN_RIGHT"
 
-            # In a turn state
-            if lTurn or rTurn:
-                # Check turn completion condition
-                if (rightArea > exitThresh and rTurn) or (leftArea > exitThresh and lTurn):
-                    lTurn = False
-                    rTurn = False
-                    prevDiff = 0
-                    if lDetected:
-                        t += 1
-                        print(f"[NAV EVENT] Completed turn {t}/12")
-                        lDetected = False
-                elif lTurn:
-                    angle = max(angle, sharpLeft)
-                elif rTurn:
-                    angle = min(angle, sharpRight)
-            else:
-                # Clamp straight driving angle
-                angle = max(sharpLeft, min(sharpRight, angle))
+                    print(f"[NAV EVENT] Wall end detected! Triggering {targetTurnCmd}...")
+                    serial_ctrl.send_command(targetTurnCmd)
+                    isTurning = True
+                    turnStartTime = currTime
+                    t += 1
+                    lDetected = False
 
-            # Transmit continuous steering angle to ESP32 (refreshes 500ms watchdog)
-            serial_ctrl.send_steer(angle)
+            # Keep 500ms serial watchdog refreshed when driving straight
+            if not isTurning:
+                serial_ctrl.send_command("FORWARD")
 
-            # Update tracking variables
-            prevDiff = aDiff
-            prevAngle = angle
-
-            # Construct telemetry overlay for live monitor display
+            # Telemetry display overlay
             img_disp = img.copy()
             img_disp = display_roi(img_disp, [ROI1, ROI2, ROI3])
             cv2.drawContours(img_disp[ROI3[1]:ROI3[3], ROI3[0]:ROI3[2]], cListOrange, -1, (0, 255, 0), 2)
             cv2.drawContours(img_disp[ROI1[1]:ROI1[3], ROI1[0]:ROI1[2]], cListLeft, -1, (0, 255, 0), 2)
             cv2.drawContours(img_disp[ROI2[1]:ROI2[3], ROI2[0]:ROI2[2]], cListRight, -1, (0, 255, 0), 2)
 
-            telemetry_text = f"Steer: {angle} | L_Area: {leftArea} | R_Area: {rightArea} | Turns: {t}/12"
-            cv2.putText(img_disp, telemetry_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 204), 2)
+            state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"US_CENTERING ({turnDir.upper()})"
+            telemetry_text = f"State: {state_str} | L: {leftArea} | R: {rightArea} | Turns: {t}/12"
+            cv2.putText(img_disp, telemetry_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
 
             # Update live web stream & snapshot
             streamer.update_frame(img_disp)
@@ -211,23 +187,24 @@ def main():
             if show_monitor_display:
                 cv2.imshow(window_name, img_disp)
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord('q') or key == 27:  # 'q' or ESC
+                if key == ord('q') or key == 27:
                     print("[USER INTERRUPT] Stopping bot from monitor GUI...")
                     serial_ctrl.send_command("STOP")
                     break
 
             display_variables({
+                "State": state_str,
+                "Track Dir": turnDir,
                 "Left Area": leftArea,
                 "Right Area": rightArea,
-                "Steer Angle": angle,
                 "Turns": t,
                 "Marker Detected": lDetected
             })
 
             # Stop after 3 full laps (12 turns)
-            if t >= 12 and abs(angle - straightConst) <= 10:
+            if t >= 12 and not isTurning:
                 print(f"[FINISH] Completed 12 turns (3 laps). Stopping bot!")
-                time.sleep(1.0 if turnDir == "left" else 1.5)
+                time.sleep(1.0)
                 serial_ctrl.send_command("STOP")
                 break
 

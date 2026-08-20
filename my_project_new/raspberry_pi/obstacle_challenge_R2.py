@@ -3,10 +3,9 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Obstacle Challenge Autonomous Navigation (Round 2)
 
-Bench Testing & Monitor Debug Mode:
-- Displays live OpenCV window ('WRO Obstacle Challenge (Pi 5)') directly on attached monitor.
-- Live Web Camera Debug Streamer (http://<pi_ip>:8080) runs concurrently.
-- Press 'q' or 'ESC' in the window or terminal to stop bot immediately.
+Adaptive Vision Engine for Narrow Field-of-View (Pi Camera v2):
+- Red/Green Pillar Tracking with Single-Wall & Dual-Wall Fallback.
+- Dynamic Steering Mode selection for narrow FoV cameras.
 """
 
 import sys
@@ -71,7 +70,7 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False):
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Bench Testing Mode (Live Monitor Display ON)")
+    print("   Narrow FoV Adaptive Pillar & Wall Steering Engine")
     print("=" * 65)
 
     # 1. Initialize USB Serial connection to ESP32
@@ -121,7 +120,7 @@ def main():
         time.sleep(0.04)
 
     print("\n[READY] Camera & Vision Engine Ready!")
-    print("[COUNTDOWN] Bench testing bot starts driving in 3 seconds... (Press 'q' to abort)")
+    print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort)")
     for c in range(3, 0, -1):
         print(f"[COUNTDOWN] {c}...")
         if show_monitor_display:
@@ -136,15 +135,18 @@ def main():
     serial_ctrl.send_command("FORWARD")
 
     # Regions of Interest (ROI)
-    ROI1 = [20, 170, 240, 220]   # Left wall ROI
-    ROI2 = [400, 170, 620, 220]  # Right wall ROI
+    ROI1 = [10, 150, 260, 240]   # Left wall ROI
+    ROI2 = [380, 150, 630, 240]  # Right wall ROI
     ROI3 = [200, 240, 440, 360]  # Ground / Pillar ROI
 
     redTarget = 120    # Target X coordinate when keeping Red pillar on left
     greenTarget = 520  # Target X coordinate when keeping Green pillar on right
     straightConst = 100
+    targetWallArea = 2200
+    wallMinArea = 200
 
     t = 0  # Completed lap/turn counter
+    navMode = "TRACKING"
 
     try:
         while True:
@@ -169,18 +171,34 @@ def main():
             p_green = Pillar(0, 999, 0, 0, greenTarget)
             p_green, num_green = find_pillar(cListGreen, greenTarget, p_green, "green", ROI3)
 
-            # Determine active steering target
+            # -------------------------------------------------------------
+            # ADAPTIVE STEERING SELECTION FOR NARROW FOV
+            # -------------------------------------------------------------
             steer_angle = straightConst
 
             if p_red.area > 0 and p_red.dist < p_green.dist:
+                navMode = "RED_PILLAR"
                 error = p_red.x - redTarget
                 steer_angle = int(straightConst - (error * 0.15))
             elif p_green.area > 0:
+                navMode = "GREEN_PILLAR"
                 error = p_green.x - greenTarget
                 steer_angle = int(straightConst - (error * 0.15))
-            else:
+            elif leftArea > wallMinArea and rightArea > wallMinArea:
+                navMode = "DUAL_WALL"
                 aDiff = rightArea - leftArea
                 steer_angle = int(straightConst - (aDiff * 0.02))
+            elif leftArea > wallMinArea:
+                navMode = "SINGLE_LEFT"
+                wallError = leftArea - targetWallArea
+                steer_angle = int(straightConst + (wallError * 0.015))
+            elif rightArea > wallMinArea:
+                navMode = "SINGLE_RIGHT"
+                wallError = rightArea - targetWallArea
+                steer_angle = int(straightConst - (wallError * 0.015))
+            else:
+                navMode = "SEARCHING"
+                steer_angle = straightConst
 
             steer_angle = max(60, min(140, steer_angle))
 
@@ -206,8 +224,8 @@ def main():
 
             img_disp = img.copy()
             img_disp = display_roi(img_disp, [ROI1, ROI2, ROI3])
-            telemetry_text = f"Steer: {steer_angle} | RedDist: {p_red.dist} | GreenDist: {p_green.dist}"
-            cv2.putText(img_disp, telemetry_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 204), 2)
+            telemetry_text = f"Mode: {navMode} | Steer: {steer_angle} | RedDist: {p_red.dist} | GreenDist: {p_green.dist}"
+            cv2.putText(img_disp, telemetry_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 204), 2)
 
             streamer.update_frame(img_disp)
 
@@ -220,6 +238,7 @@ def main():
                     break
 
             display_variables({
+                "Nav Mode": navMode,
                 "Red Dist": p_red.dist,
                 "Green Dist": p_green.dist,
                 "Steer Angle": steer_angle,

@@ -1,36 +1,34 @@
 /*
-  ROBOVANGUARD – WRO Future Engineers 2025
+  ROBOVANGUARD – WRO Future Engineers 2026
   World Robot Olympiad – Future Engineers Division
 
-  Team ID: 1129
-  Team Name: ROBOVANGUARD
-
+  Team ID: 1129 | Team Name: ROBOVANGUARD
   Mentor: Mr. S. Valai Ganesh (Mech, AP SG)
   Team Leader: M. Manojkumar (CSBS) – Reg. No: 953623244024
   Hardware Lead: V. Rakshit (EEE) – Reg. No: 953623105044
   Mechanical: P. Chandru (Mech) – Reg. No: 953623114009
 
-  Project Summary:
-  - Intelligent autonomous vehicle utilizing ESP32, Ackermann steering, and ultrasonic array.
-  - Controls drive motors and steering servo via USB Serial from Raspberry Pi 5 or standalone ultrasonic logic.
+  Hybrid Architecture:
+  - Ultrasonic Side-Wall Centering running on ESP32 at high rate.
+  - Pi 5 Vision triggers Turn Directions (TURN_LEFT / TURN_RIGHT / STOP).
+  - Pauses Side Ultrasonic Centering during timed corner arc turns.
 */
 
-// ########### Configuration & Navigation Parameters ################################################## //
-int line_chk_count = 12;  // Lap check threshold
+int line_chk_count = 12;  // Lap check threshold (3 laps x 4 turns = 12)
 int line_count = 0;
 
 //#---Bot Speeds---######################################################################
-int normal_speed = 200; // pwm (0-255)
-int turn_speed = 220;   // pwm (0-255)
-int turn_delay = 2000;  // ms
-//#######################################################################################
-int fus_slow_speed = 200; // pwm
-int fus_slow_dist = 130;  // cm
+int normal_speed = 200; // PWM (0-255)
+int turn_speed = 220;   // PWM (0-255)
+int turn_delay = 1300;  // ms (corner turn arc duration)
+int fus_slow_speed = 180; // PWM
+int fus_slow_dist = 100;  // cm
 
-//#---Servo Angles---####################################################################
-int servo_center = 100;                 // 100 deg (Straight center)
-int left_turn_angle = servo_center - 40; // 60 deg (Left turn - 40 deg max steering)
-int right_turn_angle = servo_center + 40;// 140 deg (Right turn - 40 deg max steering)
+//#---Servo Angles (+-40 deg steering range)---###########################################
+int servo_center = 100;                  // 100 deg (Straight center)
+int left_turn_angle = servo_center - 40; // 60 deg (Left turn)
+int right_turn_angle = servo_center + 40;// 140 deg (Right turn)
+int target_wall_dist = 25;               // cm target distance from side wall
 //#######################################################################################
 
 bool lt_st_count = 0;
@@ -50,6 +48,11 @@ String serialCommandBuffer = "";
 unsigned long lastCommandTime = 0;
 const unsigned long COMMAND_TIMEOUT = 500; // 500ms failsafe timeout
 bool serialControlActive = false;
+bool useSideUltrasonic = true;             // Enables/disables ESP32 ultrasonic centering
+
+// Timed Arc Turn State Machine
+bool isTurning = false;
+unsigned long turnStartTime = 0;
 
 // Forward declarations for unified movement execution functions (in Lib_Declarations_Setup.ino)
 void execute_forward();
@@ -59,6 +62,9 @@ void execute_right();
 void execute_stop();
 void execute_steer(int angle);
 void execute_drive(int speed, int angle);
+void side_us_logic_fun();
+void US_Values(int &f, int &f1, int &f2, int &b, int &l, int &r);
+void bot_shutdown();
 
 // Process incoming command from Raspberry Pi 5 over USB Serial
 void processCommand(String cmd) {
@@ -70,26 +76,47 @@ void processCommand(String cmd) {
   serialControlActive = true;
 
   if (cmd == "FORWARD") {
+    isTurning = false;
     execute_forward();
     Serial.println("ACK:FORWARD");
   } else if (cmd == "BACKWARD") {
+    isTurning = false;
     execute_backward();
     Serial.println("ACK:BACKWARD");
-  } else if (cmd == "LEFT") {
-    execute_left();
-    Serial.println("ACK:LEFT");
-  } else if (cmd == "RIGHT") {
-    execute_right();
-    Serial.println("ACK:RIGHT");
+  } else if (cmd == "LEFT" || cmd == "TURN_LEFT") {
+    isTurning = true;
+    turnStartTime = millis();
+    moveServoTo(left_turn_angle);
+    motor_forward(turn_speed);
+    line_count++;
+    Serial.print("ACK:TURN_LEFT:COUNT:");
+    Serial.println(line_count);
+  } else if (cmd == "RIGHT" || cmd == "TURN_RIGHT") {
+    isTurning = true;
+    turnStartTime = millis();
+    moveServoTo(right_turn_angle);
+    motor_forward(turn_speed);
+    line_count++;
+    Serial.print("ACK:TURN_RIGHT:COUNT:");
+    Serial.println(line_count);
   } else if (cmd == "STOP") {
+    isTurning = false;
     execute_stop();
     Serial.println("ACK:STOP");
+  } else if (cmd == "AUTO_US_ON") {
+    useSideUltrasonic = true;
+    Serial.println("ACK:AUTO_US_ON");
+  } else if (cmd == "AUTO_US_OFF") {
+    useSideUltrasonic = false;
+    Serial.println("ACK:AUTO_US_OFF");
   } else if (cmd.startsWith("STEER:")) {
+    isTurning = false;
     int angle = cmd.substring(6).toInt();
     execute_steer(angle);
     Serial.print("ACK:STEER:");
     Serial.println(angle);
   } else if (cmd.startsWith("DRIVE:")) {
+    isTurning = false;
     int firstColon = cmd.indexOf(':');
     int secondColon = cmd.indexOf(':', firstColon + 1);
     if (secondColon != -1) {
@@ -131,6 +158,7 @@ void checkFailsafe() {
     if (millis() - lastCommandTime > COMMAND_TIMEOUT) {
       execute_stop();
       serialControlActive = false;
+      isTurning = false;
     }
   }
 }
@@ -140,8 +168,22 @@ void loop() {
   checkSerialInput();
   checkFailsafe();
 
-  // 2. Autonomous sensor & state machine logic (only active when DPDT switch is ON and not overridden by serial)
-  if (!serialControlActive) {
+  // 2. Timed Arc Turn Non-Blocking Update
+  if (isTurning) {
+    if (millis() - turnStartTime >= (unsigned long)turn_delay) {
+      isTurning = false;
+      moveServoTo(servo_center);
+      motor_forward(normal_speed);
+      Serial.println("ACK:TURN_COMPLETE");
+    }
+  } 
+  // 3. Side Ultrasonic Centering (Active when driving forward and not executing a turn)
+  else if (serialControlActive && useSideUltrasonic) {
+    US_Values(f_us, f1_us, f2_us, b_us, l_us, r_us);
+    side_us_logic_fun();
+  }
+  // 4. Standalone Autonomous DPDT Logic (when Pi 5 is not connected)
+  else if (!serialControlActive) {
     DPDT_STATE = digitalRead(DPDT_Push_Button_Pin);
 
     if (DPDT_STATE == 1) { 
@@ -152,49 +194,53 @@ void loop() {
       }
 
       if (line_count >= line_chk_count) {
-        end_stop();
+        execute_stop();
         bot_shutdown();
         LOGIC_LOCK = 0;
         line_count = 0; 
       }
     } else {
-      // Keep bot in completely quiet stopped state when DPDT switch is off
       bot_shutdown();
     }
   }
 }
 
+// Robust Side Ultrasonic Steering Logic with Outlier Filtering & Dual/Single Wall Fallback
 void side_us_logic_fun() {              
+  // Emergency front collision slow-down
   if (f_us > 0 && f_us < fus_slow_dist) {
     motor_forward(fus_slow_speed);
   } else {
     motor_forward(normal_speed);
   } 
 
-  // Left wall obstacle avoidance: steer right
-  if ((l_us < 30) && (l_us > 0)) { 
-    rgb_led(255, 0, 50); 
-    moveServoTo(servo_center + 10);
+  bool valid_left = (l_us > 5 && l_us < 120);
+  bool valid_right = (r_us > 5 && r_us < 120);
 
-    if (rt_st_count == 0 && lt_st_count == 0) {
-      lt_st_count = 1;
-    }
-  }
-  // Centered between walls: keep straight
-  else if ((l_us >= 30) && (r_us >= 30) && (l_us > 0) && (r_us > 0)) { 
-    rgb_led(0, 255, 0);
-    moveServoTo(servo_center);
+  // CASE 1: Both Left and Right ultrasonic sensors see valid walls -> Centering
+  if (valid_left && valid_right) {
+    rgb_led(0, 255, 0); // Green LED
+    int diff = r_us - l_us; // Positive if shifted towards left
+    int target_angle = servo_center - (diff * 2);
+    moveServoTo(target_angle);
   } 
-  // Right wall obstacle avoidance: steer left
-  else if ((r_us < 30) && (r_us > 0)) {
-    rgb_led(255, 0, 50); 
-    moveServoTo(servo_center - 10);
-
-    if (lt_st_count == 0 && rt_st_count == 0) {
-      rt_st_count = 1;
-    }
-  } else {
-    // Default straight if no side walls detected
+  // CASE 2: Only Left ultrasonic sees valid wall -> Maintain target left distance
+  else if (valid_left) {
+    rgb_led(0, 255, 255); // Cyan LED
+    int err = l_us - target_wall_dist;
+    int target_angle = servo_center + (err * 2);
+    moveServoTo(target_angle);
+  } 
+  // CASE 3: Only Right ultrasonic sees valid wall -> Maintain target right distance
+  else if (valid_right) {
+    rgb_led(255, 255, 0); // Yellow LED
+    int err = r_us - target_wall_dist;
+    int target_angle = servo_center - (err * 2);
+    moveServoTo(target_angle);
+  } 
+  // CASE 4: No valid side wall readings -> Maintain straight center
+  else {
+    rgb_led(255, 0, 0); // Red LED
     moveServoTo(servo_center);
   }
 }
@@ -203,46 +249,4 @@ void bot_shutdown() {
   motor_stop();
   moveServoTo(servo_center);
   rgb_led(0, 0, 0);
-}
-
-void left_stop() {
-  rgb_led(255, 255, 255);
-  if (left_right_arc_turn) {
-    motor_forward(210);
-    delay(1000);
-  }
-  moveServoTo(left_turn_angle);
-  delay(1500);
-  moveServoTo(right_turn_angle);
-  delay(1500);
-  moveServoTo(servo_center);
-  delay(1000);
-  motor_stop();
-  rgb_led(0, 0, 0);
-}
-
-void right_stop() {
-  rgb_led(255, 255, 255);
-  if (left_right_arc_turn) {
-    motor_forward(210);
-    delay(1000);
-  }
-  moveServoTo(right_turn_angle);
-  delay(1500);
-  moveServoTo(left_turn_angle);
-  delay(1500);
-  moveServoTo(servo_center);
-  delay(1000);
-  motor_stop();
-  rgb_led(0, 0, 0);
-}
-
-void end_stop() {
-  if (lt_st_count == 1) {
-    left_stop();
-  } else if (rt_st_count == 1) {
-    right_stop();
-  } else {
-    bot_shutdown();
-  }
 }
