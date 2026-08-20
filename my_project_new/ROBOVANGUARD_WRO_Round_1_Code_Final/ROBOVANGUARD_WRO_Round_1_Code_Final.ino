@@ -258,22 +258,22 @@ void side_us_logic_fun() {
   // CASE 1: Both Left and Right ultrasonic sensors see valid walls -> Centering
   if (valid_left && valid_right) {
     rgb_led(0, 255, 0); // Green LED
-    int diff = r_us - l_us; // Positive if shifted towards left
-    int target_angle = servo_center - (diff * 2);
+    int diff = r_us - l_us; // Positive when closer to Left wall
+    int target_angle = servo_center + (diff * 2); // Steers RIGHT (+) away from Left wall
     moveServoTo(target_angle);
   } 
   // CASE 2: Only Left ultrasonic sees valid wall -> Maintain target left distance
   else if (valid_left) {
     rgb_led(0, 255, 255); // Cyan LED
-    int err = l_us - target_wall_dist;
-    int target_angle = servo_center + (err * 2);
+    int err = target_wall_dist - l_us; // Positive when too close to Left wall
+    int target_angle = servo_center + (err * 2); // Steers RIGHT (+) away from Left wall
     moveServoTo(target_angle);
   } 
   // CASE 3: Only Right ultrasonic sees valid wall -> Maintain target right distance
   else if (valid_right) {
     rgb_led(255, 255, 0); // Yellow LED
-    int err = r_us - target_wall_dist;
-    int target_angle = servo_center - (err * 2);
+    int err = target_wall_dist - r_us; // Positive when too close to Right wall
+    int target_angle = servo_center - (err * 2); // Steers LEFT (-) away from Right wall
     moveServoTo(target_angle);
   } 
   // CASE 4: No valid side wall readings -> Maintain straight center
