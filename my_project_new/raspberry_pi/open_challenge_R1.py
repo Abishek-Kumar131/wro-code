@@ -4,9 +4,10 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 Hybrid Sensor-Vision Control Architecture:
+- Vision-Dynamic Corner Exit: Dynamically exits corner turns when the camera
+  re-acquires the new straightaway wall (min 0.8s, max 2.2s).
 - Decoupled Line Lockout (3.5s) and Turn Cooldown (3.5s) timers.
 - Camera Vision Wall Avoidance: Dynamically calculates steering angle to deflect AWAY from black walls.
-- Supports both Ultrasonic hardware mode and pure Camera Vision mode.
 """
 
 import sys
@@ -23,7 +24,7 @@ from camera_streamer import CameraDebugStreamer
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Hybrid Architecture: Dual Ultrasonic + Vision Wall Avoidance")
+    print("   Hybrid Architecture: Vision-Dynamic Corner Turn Exit")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -93,7 +94,7 @@ def main():
         time.sleep(1.0)
 
     # 5. Start robot driving forward
-    print("[START] Driving FORWARD with Wall Avoidance!")
+    print("[START] Driving FORWARD with Vision-Dynamic Turn Exit!")
     serial_ctrl.send_command("FORWARD")
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
@@ -110,7 +111,11 @@ def main():
     lineLockoutUntil = 0   # 3.5s line detection lockout timer
     turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
-    turnDuration = 2.0     # 2.0 seconds corner arc turn duration
+    
+    # Dynamic Turn Exit Timings (Optimized for Narrow FOV Camera)
+    minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
+    maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
+    wallReacquireArea = 600 # Area threshold to confirm single wall in narrow FOV view
     turnThresh = 200       # Area threshold below which wall end is detected
 
     try:
@@ -160,18 +165,28 @@ def main():
                     print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # 2. HYBRID CORNER TURN TRIGGERING (STRICT LINE + WALL DROP)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT
             # -------------------------------------------------------------
             if isTurning:
                 # Continuously stream active turn command to refresh ESP32 500ms watchdog & lock servo angle!
                 targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
                 serial_ctrl.send_command(targetTurnCmd)
 
-                if currTime - turnStartTime >= turnDuration:
+                turnElapsed = currTime - turnStartTime
+
+                # DYNAMIC TURN EXIT CONDITION:
+                # After minTurnDuration (0.8s), exit as soon as new wall is acquired (leftArea > 800 or rightArea > 800),
+                # OR when maxTurnDuration (2.2s) safety timeout is reached!
+                newWallAcquired = (turnElapsed >= minTurnDuration) and (leftArea >= wallReacquireArea or rightArea >= wallReacquireArea)
+                maxTimeoutReached = (turnElapsed >= maxTurnDuration)
+
+                if newWallAcquired or maxTimeoutReached:
                     isTurning = False
                     turnCooldownUntil = currTime + lockoutDuration  # 3.5s cooldown after turn ends
                     lineLockoutUntil = currTime + lockoutDuration   # 3.5s line lockout after turn ends
-                    print(f"[NAV EVENT] Completed turn {t}/12 ({turnDir.upper()}). Resuming straightaway!")
+                    exit_reason = "WALL_REACQUIRED" if newWallAcquired else "MAX_TIMEOUT"
+                    print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
+            
             elif currTime >= turnCooldownUntil:
                 # Wall drop check (wall area drops below turnThresh)
                 wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
@@ -187,7 +202,7 @@ def main():
                     isTurning = True
                     turnStartTime = currTime
                     lDetected = False  # Reset marker flag for next straightaway!
-                    turnCooldownUntil = currTime + turnDuration + lockoutDuration
+                    turnCooldownUntil = currTime + maxTurnDuration + lockoutDuration
 
             # -------------------------------------------------------------
             # 3. STRAIGHTAWAY WALL AVOIDANCE (ULTRASONIC OR VISION)
@@ -221,7 +236,12 @@ def main():
             lock_rem = max(0.0, round(lineLockoutUntil - currTime, 1))
             lock_str = f"LOCKED({lock_rem}s)" if lock_rem > 0 else "READY"
             us_mode_str = "US_CENTERING" if us_hardware_working else "VISION_WALLS"
-            state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"{us_mode_str} ({turnDir.upper()})"
+            
+            if isTurning:
+                t_ela = round(currTime - turnStartTime, 1)
+                state_str = f"TURNING ({turnDir.upper()} {t_ela}s)"
+            else:
+                state_str = f"{us_mode_str} ({turnDir.upper()})"
             
             telemetry_text = f"Cam:{cam_type} | State:{state_str} | Turns:{t}/12 | LineSeen:{lDetected}"
             wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | LineLock:{lock_str}"
