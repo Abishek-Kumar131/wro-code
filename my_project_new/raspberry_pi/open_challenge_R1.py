@@ -19,7 +19,6 @@ from wro_serial import WROSerialController
 from masks import rOrange, rBlack, rBlue
 from wro_functions import (CameraManager, find_black_wall_contours, find_contours, max_contour, draw_roi,
                            draw_offset_contours, display_variables)
-from camera_streamer import CameraDebugStreamer
 
 
 def main():
@@ -50,10 +49,6 @@ def main():
     serial_ctrl.send_command("STOP")
     time.sleep(0.5)
 
-    # 2. Start Live Web Camera Debug Streamer (port 8080)
-    streamer = CameraDebugStreamer(port=8080)
-    streamer.start()
-
     show_monitor_display = "--no-display" not in sys.argv
     window_name = "WRO Open Challenge - Hybrid Monitor Debug (Pi 5)"
 
@@ -66,7 +61,7 @@ def main():
             print(f"[WARNING] Could not open GUI display window: {e}")
             show_monitor_display = False
 
-    # 3. Initialize Camera (Picamera2 or USB Webcam)
+    # 2. Initialize Camera (Picamera2 or USB Webcam)
     camera = CameraManager(force_webcam=force_webcam, device_index=0)
     camera.start()
 
@@ -75,13 +70,12 @@ def main():
     for _ in range(15):
         warmup_frame = camera.capture_array()
         if warmup_frame is not None:
-            streamer.update_frame(warmup_frame)
             if show_monitor_display:
                 cv2.imshow(window_name, warmup_frame)
                 cv2.waitKey(1)
         time.sleep(0.04)
 
-    # 4. Safety Countdown before bot starts driving
+    # 3. Safety Countdown before bot starts driving
     print("\n[READY] Hybrid Sensor-Vision Engine Ready!")
     print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort, 'l'/'r' to set dir)")
     for c in range(3, 0, -1):
@@ -94,7 +88,7 @@ def main():
             cv2.waitKey(1)
         time.sleep(1.0)
 
-    # 5. Start robot driving forward
+    # 4. Start robot driving forward
     print("[START] Driving FORWARD with Vision-Dynamic Turn Exit!")
     serial_ctrl.send_command("FORWARD")
 
@@ -252,9 +246,6 @@ def main():
             cv2.putText(img_disp, wall_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
             cv2.putText(img_disp, us_text, (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-            # Update live web stream & snapshot
-            streamer.update_frame(img_disp)
-
             # Display directly on monitor screen & keyboard controls
             if show_monitor_display:
                 cv2.imshow(window_name, img_disp)
@@ -299,7 +290,6 @@ def main():
         print("\n[SAFETY] Keyboard Interrupt. Halting bot...")
     finally:
         serial_ctrl.send_command("STOP")
-        streamer.stop()
         camera.stop()
         time.sleep(0.1)
         serial_ctrl.disconnect()
