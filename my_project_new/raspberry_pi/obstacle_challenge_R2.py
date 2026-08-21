@@ -3,15 +3,15 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Obstacle Challenge Autonomous Navigation (Round 2)
 
-Integrated ObstacleChallengeV2 Architecture:
-- Triple Safeguard Red Pillar vs Orange Line Separation:
-  1. Vertical ROI Separation (ROI3 Pillars: Y in 110..245 vs ROI4 Lines: Y in 260..330).
-  2. Aspect Ratio Filter (Pillars are tall H/W >= 0.75 vs Lines are flat horizontal H/W < 0.6).
-  3. Pure Red HSV Masking with explicit Orange Hue Subtraction.
-- Turn Counter Tracking (t += 1 on floor lines up to 12 turns / 3 laps) with 3.5s Decoupled Lockout.
-- PD Steering for Pillar Avoidance with Vertical Y Proximity Scaling (cKp=0.25, cKd=0.25, cy=0.08).
-- PD Steering for Wall Centering (kp=0.015, kd=0.01).
-- Dual-Layer HSV+LAB Black Wall Segmentation with 100% Pillar & Line Color Exclusion.
+Hybrid Vision Architecture:
+- Exact Corner Turn Logic & Vision-Dynamic Turn Exit from open_challenge_R1.py:
+  * Triggers turn on Floor Marker Line + Corner Wall Drop.
+  * Vision-Dynamic Turn Exit: Dynamically exits corner turn as soon as the camera re-acquires the new straightaway wall (min 0.8s, max 2.2s).
+  * Decoupled 3.5s Line Lockout and Turn Cooldown timers.
+- Integrated ObstacleChallengeV2 Straightaway Steering Engine:
+  * PD Steering for Red/Green Pillar Avoidance with Vertical Y Proximity Scaling (cKp=0.25, cKd=0.25, cy=0.08).
+  * PD Steering for Wall Centering (kp=0.015, kd=0.01).
+- Triple Safeguard Red/Orange Separation (0% Red/Orange Overlap).
 - Emergency Pillar Reversing & Safety Collision Prevention.
 - Advanced Lap 3 Magenta Parking Lot Navigation (Head-In Parking at t >= 12).
 """
@@ -86,10 +86,18 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=37
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Architecture: ObstacleChallengeV2 PD Engine + Triple Red/Orange Separation")
+    print("   Hybrid Architecture: R1 Dynamic Vision Turn Exit + R2 Pillar Avoidance")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
+
+    # Check for direction override in arguments (--dir left or --dir right)
+    forced_dir = "none"
+    if "--dir" in sys.argv:
+        idx = sys.argv.index("--dir")
+        if idx + 1 < len(sys.argv):
+            forced_dir = sys.argv[idx + 1].lower()
+            print(f"[CONFIG] Forcing fixed track direction: {forced_dir.upper()}")
 
     # 1. Initialize USB Serial connection to ESP32
     serial_ctrl = WROSerialController()
@@ -103,7 +111,7 @@ def main():
     time.sleep(0.5)
 
     show_monitor_display = "--no-display" not in sys.argv
-    window_name = "WRO Obstacle Challenge - V2 Debug View (Pi 5)"
+    window_name = "WRO Obstacle Challenge - Round 2 Monitor Debug (Pi 5)"
 
     if show_monitor_display:
         try:
@@ -129,8 +137,8 @@ def main():
         time.sleep(0.04)
 
     # 3. Safety Countdown before bot starts driving
-    print("\n[READY] Obstacle V2 Control Engine Ready!")
-    print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort)")
+    print("\n[READY] Obstacle Round 2 Engine Ready!")
+    print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort, 'l'/'r' to set dir)")
     for c in range(3, 0, -1):
         print(f"[COUNTDOWN] {c}...")
         if show_monitor_display and warmup_frame is not None:
@@ -141,11 +149,11 @@ def main():
             cv2.waitKey(1)
         time.sleep(1.0)
 
-    print("[START] Driving FORWARD with ObstacleV2 PD Steering Engine!")
+    print("[START] Driving FORWARD with Dynamic Vision Turn Exit & Pillar Avoidance!")
     serial_ctrl.send_command("FORWARD")
 
     # ------------------------------------------------------------------------
-    # Initialization of ObstacleChallengeV2 Parameters
+    # Obstacle & Steering Parameters
     # ------------------------------------------------------------------------
     redTarget = 110    # Target X position for Red Pillars (Keep on LEFT)
     greenTarget = 530  # Target X position for Green Pillars (Keep on RIGHT)
@@ -153,7 +161,7 @@ def main():
     straightConst = 100 # Steering center (100 degrees)
     sharpRight = 60    # Sharp right steering lock
     sharpLeft = 140    # Sharp left steering lock
-    motorSpeed = 245   # PWM speed
+    motorSpeed = 245   # Motor PWM speed
 
     # PD Wall-Centering gains
     kp = 0.015
@@ -171,11 +179,21 @@ def main():
     ROI3 = [redTarget - 50, 110, greenTarget + 50, 245] # Signal Pillars ROI (Standing 3D Pillars above horizon!)
     ROI4 = [200, 260, 440, 330]  # Ground Markers & Parking Lot ROI (Floor Lines)
 
-    # Navigation state variables & turn lockout timer
-    turnDir = "none"
-    t = 0                  # Turn counter (3 laps x 4 turns = 12)
+    # Navigation flags & state counters (exact open_challenge_R1.py timing model)
+    t = 0                  # Completed turn count (3 laps x 4 turns = 12)
+    turnDir = forced_dir   # Track direction ("left", "right", or "none")
+    lDetected = False
+    isTurning = False
+    turnStartTime = 0
     lineLockoutUntil = 0   # 3.5s line detection lockout timer
+    turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
+
+    # Dynamic Turn Exit Timings (Optimized for Narrow FOV Camera)
+    minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
+    maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
+    wallReacquireArea = 600 # Area threshold to confirm single wall in narrow FOV view
+    turnThresh = 200       # Area threshold below which wall end is detected
 
     tempParking = False
     parkingL = False
@@ -223,100 +241,136 @@ def main():
             b_us = us_data.get("b", 0)
 
             # -------------------------------------------------------------
-            # LINE MARKER DETECTION & TURN/LAP COUNTING (t += 1 up to 12)
+            # 1. LINE MARKER DETECTION (WITH DECOUPLED 3.5-SECOND LOCKOUT)
             # -------------------------------------------------------------
-            if currTime >= lineLockoutUntil:
+            if not isTurning and currTime >= lineLockoutUntil:
                 if orangeArea > 150 and orangeArea > blueArea:
-                    t += 1
-                    lineLockoutUntil = currTime + lockoutDuration
-                    if turnDir == "none":
+                    lDetected = True
+                    if forced_dir == "none":
                         turnDir = "right"
-                    print(f"[MARKER DETECTED] Crossed ORANGE Line -> Turn {t}/12 (Track Dir = RIGHT, 3.5s Lockout)")
-                elif blueArea > 150 and blueArea > orangeArea:
-                    t += 1
                     lineLockoutUntil = currTime + lockoutDuration
-                    if turnDir == "none":
+                    print(f"[VISION MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT (3.5s Line Lockout)")
+                elif blueArea > 150 and blueArea > orangeArea:
+                    lDetected = True
+                    if forced_dir == "none":
                         turnDir = "left"
-                    print(f"[MARKER DETECTED] Crossed BLUE Line -> Turn {t}/12 (Track Dir = LEFT, 3.5s Lockout)")
+                    lineLockoutUntil = currTime + lockoutDuration
+                    print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # Nearest Pillar Tracking (ObstacleChallengeV2 Logic)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (FROM OPEN_CHALLENGE_R1)
             # -------------------------------------------------------------
-            temp_p = Pillar(0, 1000000, 0, 0, greenTarget)
-            cPillar, num_pillars_g = find_pillar(contours_green, greenTarget, temp_p, "green", ROI3, tempParking, maxDist, endConst)
-            cPillar, num_pillars_r = find_pillar(contours_red, redTarget, cPillar, "red", ROI3, tempParking, maxDist, endConst)
+            if isTurning:
+                # Continuously stream active turn command to refresh ESP32 500ms watchdog & lock servo angle!
+                targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
+                serial_ctrl.send_command(targetTurnCmd)
 
-            # Dynamically adjust PD gains based on pillar density
-            if num_pillars_g >= 2 or num_pillars_r >= 2:
-                endConst = 60
-                cKp, cKd, cy = 0.20, 0.20, 0.05
-            else:
-                endConst = 30
-                cKp, cKd, cy = 0.25, 0.25, 0.08
+                turnElapsed = currTime - turnStartTime
 
-            # -------------------------------------------------------------
-            # Servo Steering Calculations (ObstacleChallengeV2 PD Engine)
-            # -------------------------------------------------------------
-            navMode = "SEARCHING"
+                # DYNAMIC TURN EXIT CONDITION:
+                # After minTurnDuration (0.8s), exit as soon as new wall is acquired (leftArea >= 600 or rightArea >= 600),
+                # OR when maxTurnDuration (2.2s) safety timeout is reached!
+                newWallAcquired = (turnElapsed >= minTurnDuration) and (leftArea >= wallReacquireArea or rightArea >= wallReacquireArea)
+                maxTimeoutReached = (turnElapsed >= maxTurnDuration)
 
-            # Case A: No Pillar Detected -> PD Wall-Centering
-            if cPillar.area == 0 and not parkingL and not parkingR:
-                navMode = "VISION_WALLS"
-                aDiff = rightArea - leftArea  # Negative when close to left wall
-                angle = int(straightConst - (aDiff * kp) - ((aDiff - prevDiff) * kd))
-                prevDiff = aDiff
+                if newWallAcquired or maxTimeoutReached:
+                    isTurning = False
+                    turnCooldownUntil = currTime + lockoutDuration  # 3.5s cooldown after turn ends
+                    lineLockoutUntil = currTime + lockoutDuration   # 3.5s line lockout after turn ends
+                    exit_reason = "WALL_REACQUIRED" if newWallAcquired else "MAX_TIMEOUT"
+                    print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
+            
+            elif currTime >= turnCooldownUntil:
+                # Wall drop check (wall area drops below turnThresh)
+                wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
+                                   (turnDir == "left" and leftArea <= turnThresh) or \
+                                   (turnDir == "right" and rightArea <= turnThresh)
 
-            # Case B: Pillar Detected -> PD Pillar Avoidance + Y Proximity Scaling
-            elif not parkingR and not parkingL:
-                navMode = "RED_PILLAR" if cPillar.target == redTarget else "GREEN_PILLAR"
-                
-                # Calculate X error relative to target position
-                error = cPillar.target - cPillar.x
-                angle = int(straightConst - (error * cKp) - ((error - prevError) * cKd))
-
-                # Adjust angle further based on vertical proximity (cy scaling)
-                if not tempParking:
-                    y_offset = int(cy * (cPillar.y - ROI3[1]))
-                    angle -= y_offset if error <= 0 else -y_offset
-
-                prevError = error
+                # STRICT TRIGGER: Require line marker detection (or forced dir) AND wall drop!
+                if (lDetected or forced_dir != "none") and wallDropDetected:
+                    targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
+                    t += 1
+                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering {targetTurnCmd} ({t}/12)...")
+                    serial_ctrl.send_command(targetTurnCmd)
+                    isTurning = True
+                    turnStartTime = currTime
+                    lDetected = False  # Reset marker flag for next straightaway!
+                    turnCooldownUntil = currTime + maxTurnDuration + lockoutDuration
 
             # -------------------------------------------------------------
-            # Emergency Reversing Safety Check (Blocked directly by pillar)
+            # 3. STRAIGHTAWAY OBSTACLE AVOIDANCE & WALL CENTERING
             # -------------------------------------------------------------
-            if ((cPillar.area > 6500 and cPillar.target == redTarget) or 
-                (cPillar.area > 8000 and cPillar.target == greenTarget)) and cPillar.y > 350 and not tempParking:
-                print("[SAFETY] Dangerously close to pillar! Executing emergency reverse...")
-                serial_ctrl.send_command("BACKWARD")
-                time.sleep(0.6)
-                serial_ctrl.send_command("FORWARD")
-                continue
+            if not isTurning:
+                # Nearest Pillar Tracking (ObstacleChallengeV2 Logic)
+                temp_p = Pillar(0, 1000000, 0, 0, greenTarget)
+                cPillar, num_pillars_g = find_pillar(contours_green, greenTarget, temp_p, "green", ROI3, tempParking, maxDist, endConst)
+                cPillar, num_pillars_r = find_pillar(contours_red, redTarget, cPillar, "red", ROI3, tempParking, maxDist, endConst)
+
+                # Dynamically adjust PD gains based on pillar density
+                if num_pillars_g >= 2 or num_pillars_r >= 2:
+                    endConst = 60
+                    cKp, cKd, cy = 0.20, 0.20, 0.05
+                else:
+                    endConst = 30
+                    cKp, cKd, cy = 0.25, 0.25, 0.08
+
+                navMode = "SEARCHING"
+
+                # Case A: No Pillar Detected -> PD Wall-Centering
+                if cPillar.area == 0 and not parkingL and not parkingR:
+                    navMode = "VISION_WALLS"
+                    aDiff = rightArea - leftArea  # Negative when close to left wall
+                    angle = int(straightConst - (aDiff * kp) - ((aDiff - prevDiff) * kd))
+                    prevDiff = aDiff
+
+                # Case B: Pillar Detected -> PD Pillar Avoidance + Y Proximity Scaling
+                elif not parkingR and not parkingL:
+                    navMode = "RED_PILLAR" if cPillar.target == redTarget else "GREEN_PILLAR"
+                    
+                    # Calculate X error relative to target position
+                    error = cPillar.target - cPillar.x
+                    angle = int(straightConst - (error * cKp) - ((error - prevError) * cKd))
+
+                    # Adjust angle further based on vertical proximity (cy scaling)
+                    if not tempParking:
+                        y_offset = int(cy * (cPillar.y - ROI3[1]))
+                        angle -= y_offset if error <= 0 else -y_offset
+
+                    prevError = error
+
+                # Emergency Reversing Safety Check (Blocked directly by pillar)
+                if ((cPillar.area > 6500 and cPillar.target == redTarget) or 
+                    (cPillar.area > 8000 and cPillar.target == greenTarget)) and cPillar.y > 350 and not tempParking:
+                    print("[SAFETY] Dangerously close to pillar! Executing emergency reverse...")
+                    serial_ctrl.send_command("BACKWARD")
+                    time.sleep(0.6)
+                    serial_ctrl.send_command("FORWARD")
+                    continue
+
+                # Constrain angle between safe mechanical limits (60 to 140 deg)
+                angle = max(60, min(140, angle))
+
+                # Stream continuous DRIVE command over USB Serial to ESP32
+                serial_ctrl.send_command("AUTO_US_OFF")
+                serial_ctrl.send_command(f"DRIVE:{motorSpeed}:{angle}")
 
             # -------------------------------------------------------------
-            # Final Lap Magenta Parking Lot Algorithm (Lap 3: t >= 12)
+            # 4. FINAL LAP MAGENTA PARKING LOT ALGORITHM (t >= 12)
             # -------------------------------------------------------------
-            if t >= 12 and not tempParking:
+            if t >= 12 and not isTurning and not tempParking:
                 print(f"[PARKING] 12 turns (3 laps) complete! Searching for Magenta Parking Lot...")
                 tempParking = True
 
-            if tempParking:
+            if tempParking and not isTurning:
                 if magentaArea > 3000:
                     navMode = "PARKING_LOT"
                     print("[PARKING] Entering Magenta Parking Lot!")
-                    # Head-in park into parking space
                     angle = sharpLeft if turnDir == "left" else sharpRight
                     serial_ctrl.send_command(f"DRIVE:{motorSpeed}:{angle}")
                     time.sleep(1.2)
                     serial_ctrl.send_command("STOP")
                     print("[FINISH] Obstacle Challenge Complete!")
                     break
-
-            # Constrain angle between safe mechanical limits (60 to 140 deg)
-            angle = max(60, min(140, angle))
-
-            # Stream continuous DRIVE command over USB Serial to ESP32
-            serial_ctrl.send_command("AUTO_US_OFF")
-            serial_ctrl.send_command(f"DRIVE:{motorSpeed}:{angle}")
 
             # Draw ROIs & Offset Contours (matching open_challenge_R1.py)
             img_disp = img.copy()
@@ -336,7 +390,13 @@ def main():
             lock_rem = max(0.0, round(lineLockoutUntil - currTime, 1))
             lock_str = f"LOCKED({lock_rem}s)" if lock_rem > 0 else "READY"
             
-            telemetry_text = f"Cam:{cam_type} | Mode:{navMode} | Steer:{angle} | Turns:{t}/12"
+            if isTurning:
+                t_ela = round(currTime - turnStartTime, 1)
+                state_str = f"TURNING ({turnDir.upper()} {t_ela}s)"
+            else:
+                state_str = f"{navMode} ({turnDir.upper()})"
+
+            telemetry_text = f"Cam:{cam_type} | State:{state_str} | Turns:{t}/12 | LineSeen:{lDetected}"
             wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | LineLock:{lock_str}"
             us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
 
@@ -351,14 +411,20 @@ def main():
                     print("[USER INTERRUPT] Stopping bot from monitor GUI...")
                     serial_ctrl.send_command("STOP")
                     break
+                elif key == ord('l'):
+                    turnDir = "left"
+                    print("[KEYBOARD OVERRIDE] Direction set to LEFT")
+                elif key == ord('r'):
+                    turnDir = "right"
+                    print("[KEYBOARD OVERRIDE] Direction set to RIGHT")
 
             display_variables({
                 "Camera Type": cam_type,
-                "Nav Mode": navMode,
-                "Steer Angle": angle,
-                "Turn Counter": f"{t}/12",
+                "State": state_str,
+                "Track Dir": turnDir,
+                "Turn Count": f"{t}/12",
                 "Line Lockout": lock_str,
-                "Pillar Dist": cPillar.dist,
+                "Line Detected": lDetected,
                 "Left Wall Area (px)": leftArea,
                 "Right Wall Area (px)": rightArea,
                 "Magenta Area (px)": magentaArea,
