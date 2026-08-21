@@ -4,10 +4,9 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 Hybrid Sensor-Vision Control Architecture:
-- 3.5-Second Line & Turn Lockout after any line detection or turn trigger.
-- Dual Wall Avoidance: Uses ESP32 Side Ultrasonic sensors when connected;
-  falls back to Pi 5 Camera Black Wall Contours when US sensors are offline.
-- Dynamically steers AWAY from walls in all driving modes.
+- Decoupled Line Lockout (3.5s) and Turn Cooldown (3.5s) timers.
+- Camera Vision Wall Avoidance: Dynamically calculates steering angle to deflect AWAY from black walls.
+- Supports both Ultrasonic hardware mode and pure Camera Vision mode.
 """
 
 import sys
@@ -28,6 +27,7 @@ def main():
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
+    use_vision_walls = "--vision-walls" in sys.argv or "--no-us" in sys.argv
 
     # Check for direction override in arguments (--dir left or --dir right)
     forced_dir = "none"
@@ -107,8 +107,9 @@ def main():
     lDetected = False
     isTurning = False
     turnStartTime = 0
-    turnCooldownUntil = 0  # Cooldown timer to lock out lines and turns
-    lockoutDuration = 3.5  # Exactly 3.5 seconds lockout after line/turn trigger
+    lineLockoutUntil = 0   # 3.5s line detection lockout timer
+    turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
+    lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
     turnDuration = 2.0     # 2.0 seconds corner arc turn duration
     turnThresh = 200       # Area threshold below which wall end is detected
 
@@ -139,27 +140,27 @@ def main():
             l_us = us_data.get("l", 0)
             r_us = us_data.get("r", 0)
             b_us = us_data.get("b", 0)
-            us_online = (l_us > 0 or r_us > 0)
+            us_hardware_working = (l_us > 5 or r_us > 5) and not use_vision_walls
 
             # -------------------------------------------------------------
-            # LINE MARKER DETECTION (WITH 3.5-SECOND LOCKOUT)
+            # 1. LINE MARKER DETECTION (WITH DECOUPLED 3.5-SECOND LOCKOUT)
             # -------------------------------------------------------------
-            if not isTurning and currTime >= turnCooldownUntil:
+            if not isTurning and currTime >= lineLockoutUntil:
                 if orangeArea > 150 and orangeArea > blueArea:
                     lDetected = True
                     if forced_dir == "none":
                         turnDir = "right"
-                    turnCooldownUntil = currTime + lockoutDuration  # 3.5s lockout
-                    print(f"[VISION MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT (3.5s Lockout Active)")
+                    lineLockoutUntil = currTime + lockoutDuration
+                    print(f"[VISION MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT (3.5s Line Lockout)")
                 elif blueArea > 150 and blueArea > orangeArea:
                     lDetected = True
                     if forced_dir == "none":
                         turnDir = "left"
-                    turnCooldownUntil = currTime + lockoutDuration  # 3.5s lockout
-                    print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Lockout Active)")
+                    lineLockoutUntil = currTime + lockoutDuration
+                    print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # HYBRID CORNER TURN TRIGGERING (STRICT LINE + WALL DROP)
+            # 2. HYBRID CORNER TURN TRIGGERING (STRICT LINE + WALL DROP)
             # -------------------------------------------------------------
             if isTurning:
                 # Continuously stream active turn command to refresh ESP32 500ms watchdog & lock servo angle!
@@ -168,18 +169,16 @@ def main():
 
                 if currTime - turnStartTime >= turnDuration:
                     isTurning = False
-                    turnCooldownUntil = currTime + lockoutDuration  # 3.5s cooldown after turn completes
-                    if us_online:
-                        serial_ctrl.send_command("FORWARD")
-                        serial_ctrl.send_command("AUTO_US_ON")
-                    print(f"[NAV EVENT] Completed turn {t}/12 ({turnDir.upper()}). Resumed Wall Avoidance!")
+                    turnCooldownUntil = currTime + lockoutDuration  # 3.5s cooldown after turn ends
+                    lineLockoutUntil = currTime + lockoutDuration   # 3.5s line lockout after turn ends
+                    print(f"[NAV EVENT] Completed turn {t}/12 ({turnDir.upper()}). Resuming straightaway!")
             elif currTime >= turnCooldownUntil:
                 # Wall drop check (wall area drops below turnThresh)
                 wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
                                    (turnDir == "left" and leftArea <= turnThresh) or \
                                    (turnDir == "right" and rightArea <= turnThresh)
 
-                # STRICT TRIGGER: Require line marker detection AND wall drop!
+                # STRICT TRIGGER: Require line marker detection (or forced dir) AND wall drop!
                 if (lDetected or forced_dir != "none") and wallDropDetected:
                     targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
                     t += 1
@@ -188,22 +187,22 @@ def main():
                     isTurning = True
                     turnStartTime = currTime
                     lDetected = False  # Reset marker flag for next straightaway!
-                    turnCooldownUntil = currTime + (turnDuration + lockoutDuration)  # Lockout for turn + 3.5s
+                    turnCooldownUntil = currTime + turnDuration + lockoutDuration
 
             # -------------------------------------------------------------
-            # STRAIGHTAWAY WALL AVOIDANCE (ULTRASONIC OR CAMERA FALLBACK)
+            # 3. STRAIGHTAWAY WALL AVOIDANCE (ULTRASONIC OR VISION)
             # -------------------------------------------------------------
             if not isTurning:
-                if us_online:
+                if us_hardware_working:
                     # ESP32 handling side ultrasonic wall-centering
                     serial_ctrl.send_command("FORWARD")
                     serial_ctrl.send_command("AUTO_US_ON")
                 else:
-                    # Pi 5 Vision Wall Centering (Steer AWAY from walls)
-                    # If left wall is bigger (closer), steer RIGHT (>100)
-                    # If right wall is bigger (closer), steer LEFT (<100)
+                    # Pi 5 Vision Wall Centering (Steer AWAY from black walls)
+                    # leftArea > rightArea => Too close to Left wall => Steer RIGHT (>100)
+                    # rightArea > leftArea => Too close to Right wall => Steer LEFT (<100)
                     aDiff = rightArea - leftArea  # Negative when close to left wall
-                    steer_angle = int(100 - (aDiff * 0.015))
+                    steer_angle = int(100 - (aDiff * 0.02))
                     steer_angle = max(60, min(140, steer_angle))
                     serial_ctrl.send_command(f"DRIVE:245:{steer_angle}")
 
@@ -218,12 +217,13 @@ def main():
             draw_offset_contours(img_disp, cListBlue, ROI3, (255, 0, 0), 2)
 
             cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
-            cd_rem = max(0.0, round(turnCooldownUntil - currTime, 1))
-            cd_str = f"LOCKED ({cd_rem}s)" if cd_rem > 0 else "READY"
-            us_str = "US_ONLINE" if us_online else "CAM_FALLBACK"
-            state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"{us_str} ({turnDir.upper()})"
+            lock_rem = max(0.0, round(lineLockoutUntil - currTime, 1))
+            lock_str = f"LOCKED({lock_rem}s)" if lock_rem > 0 else "READY"
+            us_mode_str = "US_CENTERING" if us_hardware_working else "VISION_WALLS"
+            state_str = f"TURNING ({turnDir.upper()})" if isTurning else f"{us_mode_str} ({turnDir.upper()})"
+            
             telemetry_text = f"Cam:{cam_type} | State:{state_str} | Turns:{t}/12 | LineSeen:{lDetected}"
-            wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | Lockout:{cd_str}"
+            wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | LineLock:{lock_str}"
             us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
 
             cv2.putText(img_disp, telemetry_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 204), 2)
@@ -253,8 +253,9 @@ def main():
                 "State": state_str,
                 "Track Dir": turnDir,
                 "Turn Count": f"{t}/12",
-                "Lockout (3.5s)": cd_str,
-                "Wall Avoidance": us_str,
+                "Line Lockout": lock_str,
+                "Line Detected": lDetected,
+                "Wall Steering Mode": us_mode_str,
                 "Left Wall Area (px)": leftArea,
                 "Right Wall Area (px)": rightArea,
                 "US Front (cm)": f_us,
