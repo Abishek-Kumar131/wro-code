@@ -4,12 +4,13 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Obstacle Challenge Autonomous Navigation (Round 2)
 
 Integrated ObstacleChallengeV2 Architecture:
+- Strict Red Pillar vs Orange Line Separation (0% Red/Orange Overlap).
+- Turn Counter Tracking (t += 1 on floor lines up to 12 turns / 3 laps) with 3.5s Decoupled Lockout.
 - PD Steering for Pillar Avoidance with Vertical Y Proximity Scaling (cKp=0.25, cKd=0.25, cy=0.08).
 - PD Steering for Wall Centering (kp=0.015, kd=0.01).
 - Dual-Layer HSV+LAB Black Wall Segmentation with 100% Pillar & Line Color Exclusion.
 - Emergency Pillar Reversing & Safety Collision Prevention.
-- Advanced Lap 3 Magenta Parking Lot Navigation (Left/Right Lot Head-In Parking).
-- Adapted for Raspberry Pi 5 + ESP32 USB Serial Controller.
+- Advanced Lap 3 Magenta Parking Lot Navigation (Head-In Parking at t >= 12).
 """
 
 import sys
@@ -19,7 +20,8 @@ import cv2
 import numpy as np
 from wro_serial import WROSerialController
 from masks import rMagenta, rRed, rGreen, rBlue, rOrange, rBlack, lotType
-from wro_functions import (CameraManager, find_black_wall_contours, find_contours, max_contour, draw_roi,
+from wro_functions import (CameraManager, find_black_wall_contours, find_red_pillar_contours,
+                           find_orange_line_contours, find_contours, max_contour, draw_roi,
                            draw_offset_contours, display_variables)
 
 
@@ -38,7 +40,7 @@ class Pillar:
         self.h = h
 
 
-def find_pillar(contours, target, p, colour, ROI3, tempParking=False, leftArea=0, rightArea=0, maxDist=370, endConst=30):
+def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=370, endConst=30):
     """Processes pillar contours and returns the nearest pillar candidate matching ObstacleChallengeV2 logic."""
     num_p = 0
     for cnt in contours:
@@ -81,7 +83,7 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, leftArea=0
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Architecture: Integrated ObstacleChallengeV2 PD Control Engine")
+    print("   Architecture: Integrated ObstacleChallengeV2 PD Engine + Line Counter")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -146,8 +148,8 @@ def main():
     greenTarget = 530  # Target X position for Green Pillars (Keep on RIGHT)
 
     straightConst = 100 # Steering center (100 degrees)
-    sharpRight = 60    # Sharp right steering lock (100 - 40)
-    sharpLeft = 140    # Sharp left steering lock (100 + 40)
+    sharpRight = 60    # Sharp right steering lock
+    sharpLeft = 140    # Sharp left steering lock
     motorSpeed = 245   # PWM speed
 
     # PD Wall-Centering gains
@@ -165,12 +167,12 @@ def main():
     ROI3 = [redTarget - 50, 120, greenTarget + 50, 345] # Signal Pillars ROI
     ROI4 = [200, 260, 440, 310]  # Ground Markers & Parking Lot ROI
 
-    # Navigation state variables
+    # Navigation state variables & turn lockout timer
     turnDir = "none"
-    t = 0
-    t2 = 0
-    lTurn = False
-    rTurn = False
+    t = 0                  # Turn counter (3 laps x 4 turns = 12)
+    lineLockoutUntil = 0   # 3.5s line detection lockout timer
+    lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
+
     tempParking = False
     parkingL = False
     parkingR = False
@@ -191,21 +193,22 @@ def main():
                 time.sleep(0.01)
                 continue
 
+            currTime = time.time()
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
 
-            # Extract contours using dual-layer HSV+LAB black wall segmentation (100% color exclusion)
+            # Extract contours using strict HSV+LAB separation
             contours_left = find_black_wall_contours(img, ROI1)
             contours_right = find_black_wall_contours(img, ROI2)
-            contours_red = find_contours(img_lab, rRed, ROI3)
+            contours_red = find_red_pillar_contours(img, ROI3)       # Strict Red Pillar segmentation (0% Orange overlap)
             contours_green = find_contours(img_lab, rGreen, ROI3)
-            contours_orange = find_contours(img_lab, rOrange, ROI4)
+            contours_orange = find_orange_line_contours(img, ROI4)    # Strict Orange Line segmentation (0% Red overlap)
             contours_blue = find_contours(img_lab, rBlue, ROI4)
             contours_magenta = find_contours(img_lab, rMagenta, ROI4)
 
             leftArea = max_contour(contours_left, ROI1)[0]
             rightArea = max_contour(contours_right, ROI2)[0]
-            maxO = max_contour(contours_orange, ROI4)[0]
-            maxB = max_contour(contours_blue, ROI4)[0]
+            orangeArea = max_contour(contours_orange, ROI4)[0]
+            blueArea = max_contour(contours_blue, ROI4)[0]
             magentaArea = max_contour(contours_magenta, ROI4)[0]
 
             # Get latest ultrasonic sensor telemetry from ESP32
@@ -216,11 +219,28 @@ def main():
             b_us = us_data.get("b", 0)
 
             # -------------------------------------------------------------
+            # LINE MARKER DETECTION & TURN/LAP COUNTING (t += 1 up to 12)
+            # -------------------------------------------------------------
+            if currTime >= lineLockoutUntil:
+                if orangeArea > 150 and orangeArea > blueArea:
+                    t += 1
+                    lineLockoutUntil = currTime + lockoutDuration
+                    if turnDir == "none":
+                        turnDir = "right"
+                    print(f"[MARKER DETECTED] Crossed ORANGE Line -> Turn {t}/12 (Track Dir = RIGHT, 3.5s Lockout)")
+                elif blueArea > 150 and blueArea > orangeArea:
+                    t += 1
+                    lineLockoutUntil = currTime + lockoutDuration
+                    if turnDir == "none":
+                        turnDir = "left"
+                    print(f"[MARKER DETECTED] Crossed BLUE Line -> Turn {t}/12 (Track Dir = LEFT, 3.5s Lockout)")
+
+            # -------------------------------------------------------------
             # Nearest Pillar Tracking (ObstacleChallengeV2 Logic)
             # -------------------------------------------------------------
             temp_p = Pillar(0, 1000000, 0, 0, greenTarget)
-            cPillar, num_pillars_g = find_pillar(contours_green, greenTarget, temp_p, "green", ROI3, tempParking, leftArea, rightArea, maxDist, endConst)
-            cPillar, num_pillars_r = find_pillar(contours_red, redTarget, cPillar, "red", ROI3, tempParking, leftArea, rightArea, maxDist, endConst)
+            cPillar, num_pillars_g = find_pillar(contours_green, greenTarget, temp_p, "green", ROI3, tempParking, maxDist, endConst)
+            cPillar, num_pillars_r = find_pillar(contours_red, redTarget, cPillar, "red", ROI3, tempParking, maxDist, endConst)
 
             # Dynamically adjust PD gains based on pillar density
             if num_pillars_g >= 2 or num_pillars_r >= 2:
@@ -229,23 +249,6 @@ def main():
             else:
                 endConst = 30
                 cKp, cKd, cy = 0.25, 0.25, 0.08
-
-            # -------------------------------------------------------------
-            # Track Turn Direction Detection (Orange = Right, Blue = Left)
-            # -------------------------------------------------------------
-            if turnDir == "none":
-                if maxO > 100 and maxO > maxB:
-                    turnDir = "right"
-                    print("[VISION MARKER] Detected ORANGE Line -> Track Direction = RIGHT")
-                elif maxB > 100 and maxB > maxO:
-                    turnDir = "left"
-                    print("[VISION MARKER] Detected BLUE Line -> Track Direction = LEFT")
-
-            if (turnDir == "right" and maxO > 100) or (turnDir == "left" and maxB > 100):
-                if turnDir == "right":
-                    rTurn = True
-                else:
-                    lTurn = True
 
             # -------------------------------------------------------------
             # Servo Steering Calculations (ObstacleChallengeV2 PD Engine)
@@ -288,8 +291,8 @@ def main():
             # -------------------------------------------------------------
             # Final Lap Magenta Parking Lot Algorithm (Lap 3: t >= 12)
             # -------------------------------------------------------------
-            if t >= 12 and not tempParking and ((leftArea > 2000 and rightArea > 2000 and cPillar.area < 1000) or cPillar.area < 400):
-                print("[PARKING] Searching for Magenta Parking Lot...")
+            if t >= 12 and not tempParking:
+                print(f"[PARKING] 12 turns (3 laps) complete! Searching for Magenta Parking Lot...")
                 tempParking = True
 
             if tempParking:
@@ -321,11 +324,16 @@ def main():
             draw_offset_contours(img_disp, contours_right, ROI2, (0, 255, 0), 2)
             draw_offset_contours(img_disp, contours_red, ROI3, (0, 0, 255), 2)       # Red contour for Red Pillar
             draw_offset_contours(img_disp, contours_green, ROI3, (0, 255, 0), 2)     # Green contour for Green Pillar
+            draw_offset_contours(img_disp, contours_orange, ROI4, (0, 165, 255), 2)  # Orange contour for Orange Line
+            draw_offset_contours(img_disp, contours_blue, ROI4, (255, 0, 0), 2)      # Blue contour for Blue Line
             draw_offset_contours(img_disp, contours_magenta, ROI4, (255, 0, 255), 2) # Magenta contour for Parking Lot
 
             cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
-            telemetry_text = f"Cam:{cam_type} | Mode:{navMode} | Steer:{angle} | PillarDist:{cPillar.dist}"
-            wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | Mag:{magentaArea}px"
+            lock_rem = max(0.0, round(lineLockoutUntil - currTime, 1))
+            lock_str = f"LOCKED({lock_rem}s)" if lock_rem > 0 else "READY"
+            
+            telemetry_text = f"Cam:{cam_type} | Mode:{navMode} | Steer:{angle} | Turns:{t}/12"
+            wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | LineLock:{lock_str}"
             us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
 
             cv2.putText(img_disp, telemetry_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 204), 2)
@@ -344,8 +352,9 @@ def main():
                 "Camera Type": cam_type,
                 "Nav Mode": navMode,
                 "Steer Angle": angle,
+                "Turn Counter": f"{t}/12",
+                "Line Lockout": lock_str,
                 "Pillar Dist": cPillar.dist,
-                "Pillar X": cPillar.x,
                 "Left Wall Area (px)": leftArea,
                 "Right Wall Area (px)": rightArea,
                 "Magenta Area (px)": magentaArea,
