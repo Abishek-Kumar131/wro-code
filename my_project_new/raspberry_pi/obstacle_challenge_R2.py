@@ -4,7 +4,10 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Obstacle Challenge Autonomous Navigation (Round 2)
 
 Integrated ObstacleChallengeV2 Architecture:
-- Strict Red Pillar vs Orange Line Separation (0% Red/Orange Overlap).
+- Triple Safeguard Red Pillar vs Orange Line Separation:
+  1. Vertical ROI Separation (ROI3 Pillars: Y in 110..245 vs ROI4 Lines: Y in 260..330).
+  2. Aspect Ratio Filter (Pillars are tall H/W >= 0.75 vs Lines are flat horizontal H/W < 0.6).
+  3. Pure Red HSV Masking with explicit Orange Hue Subtraction.
 - Turn Counter Tracking (t += 1 on floor lines up to 12 turns / 3 laps) with 3.5s Decoupled Lockout.
 - PD Steering for Pillar Avoidance with Vertical Y Proximity Scaling (cKp=0.25, cKd=0.25, cy=0.08).
 - PD Steering for Wall Centering (kp=0.015, kd=0.01).
@@ -83,7 +86,7 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=37
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Architecture: Integrated ObstacleChallengeV2 PD Engine + Line Counter")
+    print("   Architecture: ObstacleChallengeV2 PD Engine + Triple Red/Orange Separation")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -162,10 +165,11 @@ def main():
     cy = 0.08
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
+    # Vertically separated: ROI3 (Pillars) Y <= 245 vs ROI4 (Floor Lines) Y >= 260!
     ROI1 = [0, 175, 330, 265]   # Left Wall ROI
     ROI2 = [330, 175, 640, 265]  # Right Wall ROI
-    ROI3 = [redTarget - 50, 120, greenTarget + 50, 345] # Signal Pillars ROI
-    ROI4 = [200, 260, 440, 310]  # Ground Markers & Parking Lot ROI
+    ROI3 = [redTarget - 50, 110, greenTarget + 50, 245] # Signal Pillars ROI (Standing 3D Pillars above horizon!)
+    ROI4 = [200, 260, 440, 330]  # Ground Markers & Parking Lot ROI (Floor Lines)
 
     # Navigation state variables & turn lockout timer
     turnDir = "none"
@@ -196,12 +200,12 @@ def main():
             currTime = time.time()
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
 
-            # Extract contours using strict HSV+LAB separation
+            # Extract contours using strict separation logic
             contours_left = find_black_wall_contours(img, ROI1)
             contours_right = find_black_wall_contours(img, ROI2)
-            contours_red = find_red_pillar_contours(img, ROI3)       # Strict Red Pillar segmentation (0% Orange overlap)
+            contours_red = find_red_pillar_contours(img, ROI3)       # Strict Red Pillar + Aspect Ratio filter (H/W >= 0.75)
             contours_green = find_contours(img_lab, rGreen, ROI3)
-            contours_orange = find_orange_line_contours(img, ROI4)    # Strict Orange Line segmentation (0% Red overlap)
+            contours_orange = find_orange_line_contours(img, ROI4)    # Strict Orange Line (Floor ROI4: Y in 260..330)
             contours_blue = find_contours(img_lab, rBlue, ROI4)
             contours_magenta = find_contours(img_lab, rMagenta, ROI4)
 

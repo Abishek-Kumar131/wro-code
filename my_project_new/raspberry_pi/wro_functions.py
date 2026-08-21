@@ -1,7 +1,7 @@
 """
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 OpenCV Vision Functions, Camera Manager & Drawing Helpers
-(Includes Dual-Layer HSV+LAB Masking, 0% Red/Orange Overlap, and 0% Black/Blue Overlap)
+(Includes Aspect Ratio Filtering, Dual-Layer HSV+LAB Masking, 0% Red/Orange Overlap, and 0% Black/Blue Overlap)
 """
 
 import sys
@@ -139,39 +139,52 @@ def find_black_wall_contours(img_bgr, ROI, min_area=60):
 
 def find_red_pillar_contours(img_bgr, ROI, min_area=120):
     """
-    Strict Red Pillar segmentation (HSV H in [0..10] U [165..180], S >= 100, V >= 70)
-    with explicit Orange Hue exclusion (H in 11..25) to guarantee 0% Red/Orange overlap.
+    Strict Red Pillar segmentation (HSV H in [0..8] U [172..180], S >= 120, V >= 80)
+    with explicit Orange Hue exclusion AND Aspect Ratio filtering (H/W >= 0.75)
+    to guarantee 0% Red/Orange floor line overlap.
     """
     x1, y1, x2, y2 = ROI
     roi_bgr = img_bgr[y1:y2, x1:x2]
     roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
 
-    # Red HSV range (wraps around 0/180)
-    mask1 = cv2.inRange(roi_hsv, np.array([0, 100, 70]), np.array([10, 255, 255]))
-    mask2 = cv2.inRange(roi_hsv, np.array([165, 100, 70]), np.array([180, 255, 255]))
+    # Pure Red HSV range (strict bounds around 0/180)
+    mask1 = cv2.inRange(roi_hsv, np.array([0, 120, 80]), np.array([8, 255, 255]))
+    mask2 = cv2.inRange(roi_hsv, np.array([172, 120, 80]), np.array([180, 255, 255]))
     red_mask = cv2.bitwise_or(mask1, mask2)
 
-    # Explicitly subtract Orange Hue (H in 11..25)
-    orange_mask = cv2.inRange(roi_hsv, np.array([11, 100, 70]), np.array([25, 255, 255]))
+    # Explicitly subtract Orange Hue (H in 9..30)
+    orange_mask = cv2.inRange(roi_hsv, np.array([9, 80, 80]), np.array([30, 255, 255]))
     red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(orange_mask))
 
     kernel = np.ones((5, 5), np.uint8)
     red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return [c for c in contours if cv2.contourArea(c) > min_area]
+    
+    valid_pillars = []
+    for cnt in contours:
+        if cv2.contourArea(cnt) < min_area:
+            continue
+        # Geometry Aspect Ratio Filter: Pillars are tall/square 3D blocks (H/W >= 0.75)
+        # Floor lines are wide horizontal stripes (H/W < 0.6)
+        x, y, w, h = cv2.boundingRect(cnt)
+        aspect_ratio = float(h) / max(1.0, float(w))
+        if aspect_ratio >= 0.75:
+            valid_pillars.append(cnt)
+
+    return valid_pillars
 
 
 def find_orange_line_contours(img_bgr, ROI, min_area=100):
     """
-    Strict Orange Line segmentation (HSV H in [11..25], S >= 110, V >= 110)
+    Strict Orange Line segmentation (HSV H in [10..25], S >= 100, V >= 100)
     with Red Hue exclusion to guarantee 0% Red/Orange overlap.
     """
     x1, y1, x2, y2 = ROI
     roi_bgr = img_bgr[y1:y2, x1:x2]
     roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
 
-    orange_mask = cv2.inRange(roi_hsv, np.array([11, 110, 110]), np.array([25, 255, 255]))
+    orange_mask = cv2.inRange(roi_hsv, np.array([10, 100, 100]), np.array([25, 255, 255]))
 
     kernel = np.ones((5, 5), np.uint8)
     orange_mask = cv2.morphologyEx(orange_mask, cv2.MORPH_CLOSE, kernel)
