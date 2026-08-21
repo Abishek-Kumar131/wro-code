@@ -128,9 +128,9 @@ def main():
             currTime = time.time()
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
 
-            # Find contours using exact LAB color thresholds
-            cListLeft = find_contours(img_lab, rBlack, ROI1)
-            cListRight = find_contours(img_lab, rBlack, ROI2)
+            # Find contours using exact LAB color thresholds (subtract Blue & Orange from Black wall mask)
+            cListLeft = find_contours(img_lab, rBlack, ROI1, exclude_ranges=[rBlue, rOrange])
+            cListRight = find_contours(img_lab, rBlack, ROI2, exclude_ranges=[rBlue, rOrange])
             cListOrange = find_contours(img_lab, rOrange, ROI3)
             cListBlue = find_contours(img_lab, rBlue, ROI3)
 

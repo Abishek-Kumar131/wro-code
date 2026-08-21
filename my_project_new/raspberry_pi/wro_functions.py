@@ -1,7 +1,7 @@
 """
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 OpenCV Vision Functions, Camera Manager & Drawing Helpers
-(Matching helpers & drawing routines from my_old_contour_colorvals_crt.py)
+(Includes Color Exclusion Mask Subtraction to eliminate Black/Blue threshold overlap)
 """
 
 import sys
@@ -98,15 +98,25 @@ def morphology_clean(mask, ksize=5, iterations=1):
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=iterations)
 
 
-def find_contours(img_lab, lab_range, ROI, min_area=60):
-    """Segment an ROI in CIELAB color space, apply Gaussian blur & MORPH_CLOSE, returning filtered contours."""
+def find_contours(img_lab, lab_range, ROI, min_area=60, exclude_ranges=[]):
+    """
+    Segment an ROI in CIELAB color space, subtract any excluded color masks (e.g. blue/orange),
+    apply Gaussian blur & MORPH_CLOSE, returning filtered contours.
+    """
     x1, y1, x2, y2 = ROI
     img_segmented = img_lab[y1:y2, x1:x2]
 
     lower_mask = np.array(lab_range[0], dtype=np.uint8)
     upper_mask = np.array(lab_range[1], dtype=np.uint8)
-
     mask = cv2.inRange(img_segmented, lower_mask, upper_mask)
+
+    # Subtract excluded color masks (e.g. remove Blue & Orange from Black wall mask)
+    for ex_range in exclude_ranges:
+        ex_lower = np.array(ex_range[0], dtype=np.uint8)
+        ex_upper = np.array(ex_range[1], dtype=np.uint8)
+        ex_mask = cv2.inRange(img_segmented, ex_lower, ex_upper)
+        mask = cv2.bitwise_and(mask, cv2.bitwise_not(ex_mask))
+
     mask = cv2.GaussianBlur(mask, (7, 7), 0)
     mask = morphology_clean(mask, 5, 1)
 
