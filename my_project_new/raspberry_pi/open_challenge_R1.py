@@ -4,6 +4,7 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 Hybrid Sensor-Vision Control Architecture:
+- Dual-Layer HSV+LAB Black Wall Segmentation with explicit HSV Blue/Orange Mask Subtraction (0% Overlap).
 - Vision-Dynamic Corner Exit: Dynamically exits corner turns when the camera
   re-acquires the new straightaway wall (min 0.8s, max 2.2s).
 - Decoupled Line Lockout (3.5s) and Turn Cooldown (3.5s) timers.
@@ -16,7 +17,7 @@ import cv2
 import numpy as np
 from wro_serial import WROSerialController
 from masks import rOrange, rBlack, rBlue
-from wro_functions import (CameraManager, find_contours, max_contour, draw_roi,
+from wro_functions import (CameraManager, find_black_wall_contours, find_contours, max_contour, draw_roi,
                            draw_offset_contours, display_variables)
 from camera_streamer import CameraDebugStreamer
 
@@ -128,9 +129,9 @@ def main():
             currTime = time.time()
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
 
-            # Find contours using exact LAB color thresholds (subtract Blue & Orange from Black wall mask)
-            cListLeft = find_contours(img_lab, rBlack, ROI1, exclude_ranges=[rBlue, rOrange])
-            cListRight = find_contours(img_lab, rBlack, ROI2, exclude_ranges=[rBlue, rOrange])
+            # Find contours using dual-layer HSV+LAB black wall segmentation (100% blue exclusion)
+            cListLeft = find_black_wall_contours(img, ROI1)
+            cListRight = find_black_wall_contours(img, ROI2)
             cListOrange = find_contours(img_lab, rOrange, ROI3)
             cListBlue = find_contours(img_lab, rBlue, ROI3)
 
@@ -175,7 +176,7 @@ def main():
                 turnElapsed = currTime - turnStartTime
 
                 # DYNAMIC TURN EXIT CONDITION:
-                # After minTurnDuration (0.8s), exit as soon as new wall is acquired (leftArea > 800 or rightArea > 800),
+                # After minTurnDuration (0.8s), exit as soon as new wall is acquired (leftArea >= 600 or rightArea >= 600),
                 # OR when maxTurnDuration (2.2s) safety timeout is reached!
                 newWallAcquired = (turnElapsed >= minTurnDuration) and (leftArea >= wallReacquireArea or rightArea >= wallReacquireArea)
                 maxTimeoutReached = (turnElapsed >= maxTurnDuration)

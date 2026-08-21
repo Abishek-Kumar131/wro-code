@@ -1,7 +1,7 @@
 """
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 OpenCV Vision Functions, Camera Manager & Drawing Helpers
-(Includes Color Exclusion Mask Subtraction to eliminate Black/Blue threshold overlap)
+(Includes Dual-Layer HSV+LAB Black Masking with HSV Blue/Orange Exclusion to eliminate overlap)
 """
 
 import sys
@@ -98,25 +98,54 @@ def morphology_clean(mask, ksize=5, iterations=1):
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=iterations)
 
 
-def find_contours(img_lab, lab_range, ROI, min_area=60, exclude_ranges=[]):
+def find_black_wall_contours(img_bgr, ROI, min_area=60):
     """
-    Segment an ROI in CIELAB color space, subtract any excluded color masks (e.g. blue/orange),
-    apply Gaussian blur & MORPH_CLOSE, returning filtered contours.
+    Robust Black Side-Wall Segmentation using Dual-Layer HSV + LAB thresholds
+    and explicit HSV Blue & Orange mask subtraction to guarantee 0% blue line overlap.
     """
+    x1, y1, x2, y2 = ROI
+    roi_bgr = img_bgr[y1:y2, x1:x2]
+
+    roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2Lab)
+    roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+
+    # 1. HSV Black Mask (V <= 65, S <= 110)
+    mask_hsv_black = cv2.inRange(roi_hsv, np.array([0, 0, 0]), np.array([180, 110, 65]))
+
+    # 2. LAB Black Mask (L <= 65, A in [105, 150], B in [112, 145])
+    mask_lab_black = cv2.inRange(roi_lab, np.array([0, 105, 112]), np.array([65, 150, 145]))
+
+    # Combine HSV Black & LAB Black with AND logic
+    mask = cv2.bitwise_and(mask_hsv_black, mask_lab_black)
+
+    # 3. Explicitly subtract ALL Blue pixels (HSV Blue: H in 80..140, S >= 35)
+    blue_hsv_mask = cv2.inRange(roi_hsv, np.array([80, 35, 35]), np.array([140, 255, 255]))
+
+    # 4. Explicitly subtract ALL Orange pixels (HSV Orange: H in 5..35, S >= 40)
+    orange_hsv_mask = cv2.inRange(roi_hsv, np.array([5, 40, 40]), np.array([35, 255, 255]))
+
+    # Subtract Blue and Orange masks completely
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(blue_hsv_mask))
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(orange_hsv_mask))
+
+    # Apply MORPH_CLOSE & GaussianBlur to clean edges
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.GaussianBlur(mask, (5, 5), 0)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [c for c in contours if cv2.contourArea(c) > min_area]
+
+
+def find_contours(img_lab, lab_range, ROI, min_area=60):
+    """Segment an ROI in CIELAB color space, apply Gaussian blur & MORPH_CLOSE, returning filtered contours."""
     x1, y1, x2, y2 = ROI
     img_segmented = img_lab[y1:y2, x1:x2]
 
     lower_mask = np.array(lab_range[0], dtype=np.uint8)
     upper_mask = np.array(lab_range[1], dtype=np.uint8)
+
     mask = cv2.inRange(img_segmented, lower_mask, upper_mask)
-
-    # Subtract excluded color masks (e.g. remove Blue & Orange from Black wall mask)
-    for ex_range in exclude_ranges:
-        ex_lower = np.array(ex_range[0], dtype=np.uint8)
-        ex_upper = np.array(ex_range[1], dtype=np.uint8)
-        ex_mask = cv2.inRange(img_segmented, ex_lower, ex_upper)
-        mask = cv2.bitwise_and(mask, cv2.bitwise_not(ex_mask))
-
     mask = cv2.GaussianBlur(mask, (7, 7), 0)
     mask = morphology_clean(mask, 5, 1)
 
