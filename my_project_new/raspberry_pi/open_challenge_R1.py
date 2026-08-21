@@ -4,9 +4,9 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 Hybrid Sensor-Vision Control Architecture:
+- Permanent First-Color Lock: Whichever line color (Blue or Orange) is detected first permanently locks the track direction (Blue -> LEFT only, Orange -> RIGHT only).
 - Dual-Layer HSV+LAB Black Wall Segmentation with explicit HSV Blue/Orange Mask Subtraction (0% Overlap).
-- Vision-Dynamic Corner Exit: Dynamically exits corner turns when the camera
-  re-acquires the new straightaway wall (min 0.8s, max 2.2s).
+- Vision-Dynamic Corner Exit: Dynamically exits corner turns when the camera re-acquires the new straightaway wall (min 0.8s, max 2.2s).
 - Decoupled Line Lockout (3.5s) and Turn Cooldown (3.5s) timers.
 - Camera Vision Wall Avoidance: Dynamically calculates steering angle to deflect AWAY from black walls.
 """
@@ -24,7 +24,7 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Hybrid Architecture: Vision-Dynamic Corner Turn Exit")
+    print("   Hybrid Architecture: Permanent First-Color Direction Lock")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -89,7 +89,7 @@ def main():
         time.sleep(1.0)
 
     # 4. Start robot driving forward
-    print("[START] Driving FORWARD with Vision-Dynamic Turn Exit!")
+    print("[START] Driving FORWARD with Permanent First-Color Direction Lock!")
     serial_ctrl.send_command("FORWARD")
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
@@ -143,21 +143,35 @@ def main():
             us_hardware_working = (l_us > 5 or r_us > 5) and not use_vision_walls
 
             # -------------------------------------------------------------
-            # 1. LINE MARKER DETECTION (WITH DECOUPLED 3.5-SECOND LOCKOUT)
+            # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
             # -------------------------------------------------------------
             if not isTurning and currTime >= lineLockoutUntil:
-                if orangeArea > 150 and orangeArea > blueArea:
-                    lDetected = True
-                    if forced_dir == "none":
+                # If direction is not locked yet, lock onto whichever color is detected FIRST
+                if turnDir == "none":
+                    if orangeArea > 150 and orangeArea > blueArea:
                         turnDir = "right"
-                    lineLockoutUntil = currTime + lockoutDuration
-                    print(f"[VISION MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT (3.5s Line Lockout)")
-                elif blueArea > 150 and blueArea > orangeArea:
-                    lDetected = True
-                    if forced_dir == "none":
+                        lDetected = True
+                        lineLockoutUntil = currTime + lockoutDuration
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT (Only Orange lines will be checked!)")
+                    elif blueArea > 150 and blueArea > orangeArea:
                         turnDir = "left"
-                    lineLockoutUntil = currTime + lockoutDuration
-                    print(f"[VISION MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
+                        lDetected = True
+                        lineLockoutUntil = currTime + lockoutDuration
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT (Only Blue lines will be checked!)")
+                
+                # Once locked to RIGHT (Orange first), ONLY check Orange lines for remaining laps!
+                elif turnDir == "right":
+                    if orangeArea > 150:
+                        lDetected = True
+                        lineLockoutUntil = currTime + lockoutDuration
+                        print(f"[LOCKED MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT (3.5s Line Lockout)")
+                
+                # Once locked to LEFT (Blue first), ONLY check Blue lines for remaining laps!
+                elif turnDir == "left":
+                    if blueArea > 150:
+                        lDetected = True
+                        lineLockoutUntil = currTime + lockoutDuration
+                        print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
             # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT
@@ -256,10 +270,10 @@ def main():
                     break
                 elif key == ord('l'):
                     turnDir = "left"
-                    print("[KEYBOARD OVERRIDE] Direction set to LEFT")
+                    print("[KEYBOARD OVERRIDE] Direction permanently set to LEFT (Blue only)")
                 elif key == ord('r'):
                     turnDir = "right"
-                    print("[KEYBOARD OVERRIDE] Direction set to RIGHT")
+                    print("[KEYBOARD OVERRIDE] Direction permanently set to RIGHT (Orange only)")
 
             display_variables({
                 "Camera Type": cam_type,
