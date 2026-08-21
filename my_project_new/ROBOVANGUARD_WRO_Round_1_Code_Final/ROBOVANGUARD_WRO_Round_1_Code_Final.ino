@@ -128,12 +128,14 @@ void processCommand(String cmd) {
     Serial.println(normal_speed);
   } else if (cmd.startsWith("STEER:")) {
     isTurning = false;
+    useSideUltrasonic = false;
     int angle = cmd.substring(6).toInt();
     execute_steer(angle);
     Serial.print("ACK:STEER:");
     Serial.println(angle);
   } else if (cmd.startsWith("DRIVE:")) {
     isTurning = false;
+    useSideUltrasonic = false;
     int firstColon = cmd.indexOf(':');
     int secondColon = cmd.indexOf(':', firstColon + 1);
     if (secondColon != -1) {

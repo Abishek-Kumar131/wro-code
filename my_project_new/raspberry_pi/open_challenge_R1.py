@@ -198,7 +198,8 @@ def main():
                     serial_ctrl.send_command("FORWARD")
                     serial_ctrl.send_command("AUTO_US_ON")
                 else:
-                    # Pi 5 Vision Wall Centering (Steer AWAY from black walls)
+                    # Disable ESP32 side ultrasonic loop & send camera steering angle
+                    serial_ctrl.send_command("AUTO_US_OFF")
                     # leftArea > rightArea => Too close to Left wall => Steer RIGHT (>100)
                     # rightArea > leftArea => Too close to Right wall => Steer LEFT (<100)
                     aDiff = rightArea - leftArea  # Negative when close to left wall
