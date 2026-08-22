@@ -4,7 +4,6 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Obstacle Challenge Autonomous Navigation (Round 2)
 
 Hybrid Vision Architecture:
-- Anti-Drift Speed Control: Automatically reduces motor speed to 60% (165 PWM) during corner turns or whenever steering angle deviates >= 25 deg from center (steer <= 75 or steer >= 125). Uses 90% (230 PWM) on straightaways.
 - Permanent First-Color Lock: Whichever line color (Blue or Orange) is detected first permanently locks track direction (Blue -> LEFT only, Orange -> RIGHT only).
 - Exact Corner Turn Logic & Vision-Dynamic Turn Exit from open_challenge_R1.py:
   * Triggers turn on Floor Marker Line + Corner Wall Drop.
@@ -88,7 +87,7 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=37
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Architecture: Anti-Drift Speed Control (90% Straight / 60% Turn)")
+    print("   Architecture: Permanent First-Color Lock + Vision Dynamic Turn Exit")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -151,12 +150,7 @@ def main():
             cv2.waitKey(1)
         time.sleep(1.0)
 
-    # Speed Constants
-    SPEED_STRAIGHT = 230  # 90% PWM speed on straightaways
-    SPEED_TURN = 205      # 80% PWM speed during turns (prevents drifting)
-
-    print(f"[START] Driving FORWARD (Straight: 90% [{SPEED_STRAIGHT}], Turn: 80% [{SPEED_TURN}])!")
-    serial_ctrl.send_command(f"SET_SPEED:{SPEED_STRAIGHT}")
+    print("[START] Driving FORWARD with Permanent First-Color Lock & Vision Turn Exit!")
     serial_ctrl.send_command("FORWARD")
 
     # ------------------------------------------------------------------------
@@ -166,8 +160,9 @@ def main():
     greenTarget = 530  # Target X position for Green Pillars (Keep on RIGHT)
 
     straightConst = 100 # Steering center (100 degrees)
-    sharpRight = 60    # Sharp right steering lock
-    sharpLeft = 140    # Sharp left steering lock
+    sharpRight = 70    # Sharp right steering lock (+-30 deg max deflection)
+    sharpLeft = 130    # Sharp left steering lock (+-30 deg max deflection)
+    motorSpeed = 245   # Motor PWM speed
 
     # PD Wall-Centering gains
     kp = 0.015
@@ -256,12 +251,12 @@ def main():
                         turnDir = "right"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT!")
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT (Only Orange lines will be checked!)")
                     elif blueArea > 150 and blueArea > orangeArea:
                         turnDir = "left"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT!")
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT (Only Blue lines will be checked!)")
                 
                 # Once locked to RIGHT (Orange first), ONLY check Orange lines for remaining laps!
                 elif turnDir == "right":
@@ -278,12 +273,12 @@ def main():
                         print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (WITH 60% SPEED)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (FROM OPEN_CHALLENGE_R1)
             # -------------------------------------------------------------
             if isTurning:
-                targetAngle = 60 if turnDir == "left" else 140
-                # Stream 60% speed (165 PWM) with target turn angle to prevent drifting!
-                serial_ctrl.send_command(f"DRIVE:{SPEED_TURN}:{targetAngle}")
+                # Continuously stream active turn command to refresh ESP32 500ms watchdog & lock servo angle!
+                targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
+                serial_ctrl.send_command(targetTurnCmd)
 
                 turnElapsed = currTime - turnStartTime
 
@@ -298,7 +293,7 @@ def main():
                     turnCooldownUntil = currTime + lockoutDuration  # 3.5s cooldown after turn ends
                     lineLockoutUntil = currTime + lockoutDuration   # 3.5s line lockout after turn ends
                     exit_reason = "WALL_REACQUIRED" if newWallAcquired else "MAX_TIMEOUT"
-                    print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s! Resuming 90% speed...")
+                    print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
             
             elif currTime >= turnCooldownUntil:
                 # Wall drop check (wall area drops below turnThresh)
@@ -308,11 +303,10 @@ def main():
 
                 # STRICT TRIGGER: Require line marker detection (or forced dir) AND wall drop!
                 if (lDetected or forced_dir != "none") and wallDropDetected:
-                    targetAngle = 60 if turnDir == "left" else 140
+                    targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
                     t += 1
-                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/12) at 60% Speed ({SPEED_TURN} PWM)...")
-                    # Slow down to 60% speed (165 PWM) immediately at turn start!
-                    serial_ctrl.send_command(f"DRIVE:{SPEED_TURN}:{targetAngle}")
+                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering {targetTurnCmd} ({t}/12)...")
+                    serial_ctrl.send_command(targetTurnCmd)
                     isTurning = True
                     turnStartTime = currTime
                     lDetected = False  # Reset marker flag for next straightaway!
@@ -368,18 +362,12 @@ def main():
                     serial_ctrl.send_command("FORWARD")
                     continue
 
-                # Constrain angle between safe mechanical limits (60 to 140 deg)
-                angle = max(60, min(140, angle))
-
-                # ANTI-DRIFT DYNAMIC SPEED SELECTION:
-                # If steering angle deviates >= 25 deg from center (steer <= 75 or steer >= 125),
-                # use 60% speed (165 PWM). Otherwise use 90% speed (230 PWM) on straightaways!
-                is_sharp_steering = abs(angle - 100) >= 25
-                current_speed = SPEED_TURN if is_sharp_steering else SPEED_STRAIGHT
+                # Constrain angle between safe mechanical limits (70 to 130 deg, +-30 max)
+                angle = max(70, min(130, angle))
 
                 # Stream continuous DRIVE command over USB Serial to ESP32
                 serial_ctrl.send_command("AUTO_US_OFF")
-                serial_ctrl.send_command(f"DRIVE:{current_speed}:{angle}")
+                serial_ctrl.send_command(f"DRIVE:{motorSpeed}:{angle}")
 
             # -------------------------------------------------------------
             # 4. FINAL LAP MAGENTA PARKING LOT ALGORITHM (t >= 12)
@@ -393,7 +381,7 @@ def main():
                     navMode = "PARKING_LOT"
                     print("[PARKING] Entering Magenta Parking Lot!")
                     angle = sharpLeft if turnDir == "left" else sharpRight
-                    serial_ctrl.send_command(f"DRIVE:{SPEED_TURN}:{angle}")
+                    serial_ctrl.send_command(f"DRIVE:{motorSpeed}:{angle}")
                     time.sleep(1.2)
                     serial_ctrl.send_command("STOP")
                     print("[FINISH] Obstacle Challenge Complete!")
@@ -417,14 +405,11 @@ def main():
             lock_rem = max(0.0, round(lineLockoutUntil - currTime, 1))
             lock_str = f"LOCKED({lock_rem}s)" if lock_rem > 0 else "READY"
             
-            is_sharp_steering = abs(angle - 100) >= 25
-            current_spd_pct = "80%" if (isTurning or is_sharp_steering) else "90%"
-
             if isTurning:
                 t_ela = round(currTime - turnStartTime, 1)
-                state_str = f"TURNING ({turnDir.upper()} {t_ela}s | {current_spd_pct})"
+                state_str = f"TURNING ({turnDir.upper()} {t_ela}s)"
             else:
-                state_str = f"{navMode} ({turnDir.upper()} | {current_spd_pct})"
+                state_str = f"{navMode} ({turnDir.upper()})"
 
             telemetry_text = f"Cam:{cam_type} | State:{state_str} | Turns:{t}/12 | LineSeen:{lDetected}"
             wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | LineLock:{lock_str}"
@@ -452,7 +437,6 @@ def main():
                 "Camera Type": cam_type,
                 "State": state_str,
                 "Track Dir": turnDir,
-                "Motor Speed": current_spd_pct,
                 "Turn Count": f"{t}/12",
                 "Line Lockout": lock_str,
                 "Line Detected": lDetected,

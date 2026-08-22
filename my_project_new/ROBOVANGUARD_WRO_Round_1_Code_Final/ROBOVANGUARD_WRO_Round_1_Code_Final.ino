@@ -27,8 +27,8 @@ int fus_slow_dist = 80;   // cm (front wall distance threshold for slowdown)
 
 //#---Servo Angles (+-40 deg steering range)---###########################################
 int servo_center = 100;                  // 100 deg (Straight center)
-int left_turn_angle = servo_center - 40; // 60 deg (Left turn)
-int right_turn_angle = servo_center + 40;// 140 deg (Right turn)
+int left_turn_angle = servo_center - 30; // 70 deg (Left turn)
+int right_turn_angle = servo_center + 30;// 130 deg (Right turn)
 int target_wall_dist = 25;               // cm target distance from side wall
 //#######################################################################################
 
