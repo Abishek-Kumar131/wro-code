@@ -153,9 +153,9 @@ def main():
 
     # Speed Constants
     SPEED_STRAIGHT = 230  # 90% PWM speed on straightaways
-    SPEED_TURN = 165      # 60% PWM speed during turns (prevents drifting)
+    SPEED_TURN = 190      # 75% PWM speed during turns (prevents drifting)
 
-    print(f"[START] Driving FORWARD (Straight: 90% [{SPEED_STRAIGHT}], Turn: 60% [{SPEED_TURN}])!")
+    print(f"[START] Driving FORWARD (Straight: 90% [{SPEED_STRAIGHT}], Turn: 75% [{SPEED_TURN}])!")
     serial_ctrl.send_command(f"SET_SPEED:{SPEED_STRAIGHT}")
     serial_ctrl.send_command("FORWARD")
 
@@ -418,7 +418,7 @@ def main():
             lock_str = f"LOCKED({lock_rem}s)" if lock_rem > 0 else "READY"
             
             is_sharp_steering = abs(angle - 100) >= 25
-            current_spd_pct = "60%" if (isTurning or is_sharp_steering) else "90%"
+            current_spd_pct = "75%" if (isTurning or is_sharp_steering) else "90%"
 
             if isTurning:
                 t_ela = round(currTime - turnStartTime, 1)

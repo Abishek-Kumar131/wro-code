@@ -91,10 +91,10 @@ def main():
 
     # Speed Constants
     SPEED_STRAIGHT = 230  # 90% PWM speed on straightaways
-    SPEED_TURN = 165      # 60% PWM speed during turns (prevents drifting)
+    SPEED_TURN = 190      # 75% PWM speed during turns (prevents drifting)
 
     # 4. Start robot driving forward
-    print(f"[START] Driving FORWARD (Straight: 90% [{SPEED_STRAIGHT}], Turn: 60% [{SPEED_TURN}])!")
+    print(f"[START] Driving FORWARD (Straight: 90% [{SPEED_STRAIGHT}], Turn: 75% [{SPEED_TURN}])!")
     serial_ctrl.send_command(f"SET_SPEED:{SPEED_STRAIGHT}")
     serial_ctrl.send_command("FORWARD")
 
@@ -261,7 +261,7 @@ def main():
             us_mode_str = "US_CENTERING" if us_hardware_working else "VISION_WALLS"
             
             is_sharp_steering = abs(steer_angle - 100) >= 25
-            current_spd_pct = "60%" if (isTurning or is_sharp_steering) else "90%"
+            current_spd_pct = "75%" if (isTurning or is_sharp_steering) else "90%"
 
             if isTurning:
                 t_ela = round(currTime - turnStartTime, 1)
