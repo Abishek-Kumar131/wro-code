@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-ROBOVANGUARD - WRO Future Engineers 2025
+ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 to ESP32 USB Serial Communication Module
 
 Features:
 - USB Serial at 115200 baud
 - Automatic port detection (/dev/ttyUSB*, /dev/ttyACM*, COM*)
-- Non-blocking ACK reading & response logging
+- Strict command validation (prevents ERROR:UNKNOWN_COMMAND on ESP32)
+- Bootloader noise clearing on port open
+- Non-blocking ACK reading & telemetry logging
 - Auto-reconnection and disconnection fault-tolerance
-- Thread-safe command dispatching
 """
 
 import time
@@ -55,7 +56,6 @@ class WROSerialController:
         # Search using serial.tools.list_ports
         ports = list(serial.tools.list_ports.comports())
         for p in ports:
-            # Common USB-UART bridge chips (CP210x, CH340, FTDI, ESP32-S3 USB CDC)
             desc = p.description.lower()
             if any(k in desc for k in ["cp210", "ch340", "ftdi", "usb serial", "uart", "esp32", "acm"]):
                 print(f"[INFO] Auto-detected ESP32 Serial Port: {p.device} ({p.description})")
@@ -93,8 +93,9 @@ class WROSerialController:
                     write_timeout=0.2
                 )
                 self.port = target_port
-                # Allow ESP32 to reset if DTR toggles
-                time.sleep(1.0)
+
+                # Allow ESP32 to finish resetting and outputting bootloader text (1.5s)
+                time.sleep(1.5)
                 self.serial_conn.reset_input_buffer()
                 self.serial_conn.reset_output_buffer()
 
@@ -115,7 +116,6 @@ class WROSerialController:
         with self._lock:
             if self.serial_conn and self.serial_conn.is_open:
                 try:
-                    # Send final STOP command before closing
                     self.serial_conn.write(b"STOP\n")
                     self.serial_conn.flush()
                     self.serial_conn.close()
@@ -162,25 +162,35 @@ class WROSerialController:
     def send_command(self, command: str) -> bool:
         """
         Sends a movement command to the ESP32.
-        Command is automatically formatted with a trailing newline.
-        Supports: FORWARD, BACKWARD, LEFT, RIGHT, STOP, STEER:<angle>, DRIVE:<speed>:<angle>
+        Command is strictly validated and formatted with a trailing newline.
+        Supports: FORWARD, BACKWARD, LEFT, RIGHT, STOP, AUTO_US_ON, AUTO_US_OFF,
+                  TURN_LEFT, TURN_RIGHT, STEER:<angle>, DRIVE:<speed>:<angle>, SET_SPEED:<pwm>
         """
         cmd_clean = command.strip().upper()
-        is_valid = (
-            cmd_clean in self.VALID_COMMANDS
-            or cmd_clean.startswith("STEER:")
-            or cmd_clean.startswith("DRIVE:")
-            or cmd_clean.startswith("SET_")
-        )
+
+        # Strict command validation logic
+        parts = cmd_clean.split(":")
+        is_valid = False
+
+        if cmd_clean in self.VALID_COMMANDS:
+            is_valid = True
+        elif cmd_clean.startswith("STEER:") and len(parts) == 2 and parts[1].isdigit():
+            is_valid = True
+        elif cmd_clean.startswith("DRIVE:") and len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+            is_valid = True
+        elif cmd_clean.startswith("SET_SPEED:") and len(parts) == 2 and parts[1].isdigit():
+            is_valid = True
+        elif cmd_clean.startswith("SET_TURN_DELAY:") and len(parts) == 2 and parts[1].isdigit():
+            is_valid = True
+
         if not is_valid:
-            print(f"[ERROR] Invalid command '{command}'.", file=sys.stderr)
+            print(f"[ERROR] Rejected invalid command string '{command}'.", file=sys.stderr)
             return False
 
         message = f"{cmd_clean}\n".encode("utf-8")
 
         with self._lock:
             if not self.serial_conn or not self.serial_conn.is_open:
-                # Attempt silent reconnection
                 if not self.connect():
                     return False
 
@@ -203,11 +213,10 @@ class WROSerialController:
         return self.send_command(f"STEER:{int(angle)}")
 
     def send_drive(self, speed: int, angle: int) -> bool:
-        """Sends drive command with speed and steering angle (e.g. DRIVE:200:100)."""
+        """Sends drive command with speed and steering angle (e.g. DRIVE:245:100)."""
         return self.send_command(f"DRIVE:{int(speed)}:{int(angle)}")
 
 
-# Global singleton controller instance for simple functional access
 _default_controller: Optional[WROSerialController] = None
 
 
@@ -220,14 +229,7 @@ def get_controller(port: Optional[str] = None) -> WROSerialController:
 
 
 def send_command(command: str) -> bool:
-    """
-    Convenience function for direct invocation:
-    send_command("FORWARD")
-    send_command("LEFT")
-    send_command("RIGHT")
-    send_command("BACKWARD")
-    send_command("STOP")
-    """
+    """Convenience function for direct command transmission."""
     controller = get_controller()
     return controller.send_command(command)
 
