@@ -150,7 +150,8 @@ void processCommand(String cmd) {
       Serial.println("ERROR:INVALID_DRIVE_FORMAT");
     }
   } else {
-    Serial.println("ERROR:UNKNOWN_COMMAND");
+    Serial.print("ERROR:UNKNOWN_COMMAND:");
+    Serial.println(cmd);
   }
 }
 
@@ -160,7 +161,10 @@ void checkSerialInput() {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
       if (serialCommandBuffer.length() > 0) {
-        processCommand(serialCommandBuffer);
+        serialCommandBuffer.trim();
+        if (serialCommandBuffer.length() > 0) {
+          processCommand(serialCommandBuffer);
+        }
         serialCommandBuffer = "";
       }
     } else {

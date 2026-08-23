@@ -4,8 +4,8 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 Hybrid Sensor-Vision Control Architecture:
-- Permanent First-Color Lock: Whichever line color (Blue or Orange) is detected first permanently locks the track direction (Blue -> LEFT only, Orange -> RIGHT only).
-- Dual-Layer HSV+LAB Black Wall Segmentation with explicit HSV Blue/Orange Mask Subtraction (0% Overlap).
+- Rate-Limited Serial Transmission: Eliminates USB serial buffer overflow and ERROR:UNKNOWN_COMMAND.
+- Permanent First-Color Lock: Whichever line color (Blue or Orange) is detected first permanently locks direction.
 - Vision-Dynamic Corner Exit: Dynamically exits corner turns when the camera re-acquires the new straightaway wall (min 0.8s, max 2.2s).
 - Decoupled Line Lockout (3.5s) and Turn Cooldown (3.5s) timers.
 - Camera Vision Wall Avoidance: Dynamically calculates steering angle to deflect AWAY from black walls.
@@ -24,7 +24,7 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Hybrid Architecture: Permanent First-Color Direction Lock")
+    print("   Hybrid Architecture: Rate-Limited Serial & First-Color Lock")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -89,7 +89,7 @@ def main():
         time.sleep(1.0)
 
     # 4. Start robot driving forward
-    print("[START] Driving FORWARD with Permanent First-Color Direction Lock!")
+    print("[START] Driving FORWARD with Rate-Limited USB Serial Transmission!")
     serial_ctrl.send_command("FORWARD")
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
@@ -107,6 +107,11 @@ def main():
     turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
     
+    # Serial rate-limiting state tracking
+    last_sent_angle = -1
+    last_cmd_time = 0
+    last_us_mode = "NONE"
+
     # Dynamic Turn Exit Timings (Optimized for Narrow FOV Camera)
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
     maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
@@ -152,12 +157,12 @@ def main():
                         turnDir = "right"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT (Only Orange lines will be checked!)")
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT!")
                     elif blueArea > 150 and blueArea > orangeArea:
                         turnDir = "left"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT (Only Blue lines will be checked!)")
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT!")
                 
                 # Once locked to RIGHT (Orange first), ONLY check Orange lines for remaining laps!
                 elif turnDir == "right":
@@ -177,15 +182,16 @@ def main():
             # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT
             # -------------------------------------------------------------
             if isTurning:
-                # Continuously stream active turn command to refresh ESP32 500ms watchdog & lock servo angle!
                 targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
-                serial_ctrl.send_command(targetTurnCmd)
+                
+                # Stream active turn command every 100ms to refresh ESP32 500ms watchdog
+                if (currTime - last_cmd_time) >= 0.1:
+                    serial_ctrl.send_command(targetTurnCmd)
+                    last_cmd_time = currTime
 
                 turnElapsed = currTime - turnStartTime
 
                 # DYNAMIC TURN EXIT CONDITION:
-                # After minTurnDuration (0.8s), exit as soon as new wall is acquired (leftArea >= 600 or rightArea >= 600),
-                # OR when maxTurnDuration (2.2s) safety timeout is reached!
                 newWallAcquired = (turnElapsed >= minTurnDuration) and (leftArea >= wallReacquireArea or rightArea >= wallReacquireArea)
                 maxTimeoutReached = (turnElapsed >= maxTurnDuration)
 
@@ -208,30 +214,37 @@ def main():
                     t += 1
                     print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering {targetTurnCmd} ({t}/12)...")
                     serial_ctrl.send_command(targetTurnCmd)
+                    last_cmd_time = currTime
                     isTurning = True
                     turnStartTime = currTime
                     lDetected = False  # Reset marker flag for next straightaway!
                     turnCooldownUntil = currTime + maxTurnDuration + lockoutDuration
 
             # -------------------------------------------------------------
-            # 3. STRAIGHTAWAY WALL AVOIDANCE (ULTRASONIC OR VISION)
+            # 3. STRAIGHTAWAY WALL AVOIDANCE (RATE-LIMITED TRANSMISSION)
             # -------------------------------------------------------------
             if not isTurning:
                 if us_hardware_working:
-                    # ESP32 handling side ultrasonic wall-centering
-                    serial_ctrl.send_command("FORWARD")
-                    serial_ctrl.send_command("AUTO_US_ON")
+                    if last_us_mode != "US_ON":
+                        serial_ctrl.send_command("AUTO_US_ON")
+                        serial_ctrl.send_command("FORWARD")
+                        last_us_mode = "US_ON"
                 else:
-                    # Disable ESP32 side ultrasonic loop & send camera steering angle
-                    serial_ctrl.send_command("AUTO_US_OFF")
-                    # leftArea > rightArea => Too close to Left wall => Steer RIGHT (>100)
-                    # rightArea > leftArea => Too close to Right wall => Steer LEFT (<100)
+                    if last_us_mode != "US_OFF":
+                        serial_ctrl.send_command("AUTO_US_OFF")
+                        last_us_mode = "US_OFF"
+
                     aDiff = rightArea - leftArea  # Negative when close to left wall
                     steer_angle = int(100 - (aDiff * 0.02))
                     steer_angle = max(60, min(140, steer_angle))
-                    serial_ctrl.send_command(f"DRIVE:245:{steer_angle}")
 
-            # Draw ROIs & Offset Contours (matching my_old_contour_colorvals_crt.py)
+                    # Rate-limiting: Send DRIVE command only when angle changes or every 100ms
+                    if steer_angle != last_sent_angle or (currTime - last_cmd_time) >= 0.1:
+                        serial_ctrl.send_command(f"DRIVE:245:{steer_angle}")
+                        last_sent_angle = steer_angle
+                        last_cmd_time = currTime
+
+            # Draw ROIs & Offset Contours
             img_disp = img.copy()
             draw_roi(img_disp, ROI1, (0, 255, 255), 2)
             draw_roi(img_disp, ROI2, (0, 255, 255), 2)

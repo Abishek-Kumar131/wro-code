@@ -4,10 +4,11 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Obstacle Challenge Autonomous Navigation (Round 2)
 
 Hybrid Vision Architecture:
-- Permanent First-Color Lock: Whichever line color (Blue or Orange) is detected first permanently locks track direction (Blue -> LEFT only, Orange -> RIGHT only).
+- Rate-Limited Serial Transmission: Eliminates USB serial buffer overflow and ERROR:UNKNOWN_COMMAND.
+- Permanent First-Color Lock: Whichever line color (Blue or Orange) is detected first permanently locks track direction.
 - Exact Corner Turn Logic & Vision-Dynamic Turn Exit from open_challenge_R1.py:
   * Triggers turn on Floor Marker Line + Corner Wall Drop.
-  * Vision-Dynamic Turn Exit: Dynamically exits corner turn as soon as the camera re-acquires the new straightaway wall (min 0.8s, max 2.2s).
+  * Vision-Dynamic Turn Exit: Dynamically exits corner turn as soon as camera re-acquires new wall (min 0.8s, max 2.2s).
   * Decoupled 3.5s Line Lockout and Turn Cooldown timers.
 - Integrated ObstacleChallengeV2 Straightaway Steering Engine:
   * PD Steering for Red/Green Pillar Avoidance with Vertical Y Proximity Scaling (cKp=0.25, cKd=0.25, cy=0.08).
@@ -87,7 +88,7 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=37
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Architecture: Permanent First-Color Lock + Vision Dynamic Turn Exit")
+    print("   Architecture: Rate-Limited Serial & Dynamic Vision Turn Exit")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -150,7 +151,7 @@ def main():
             cv2.waitKey(1)
         time.sleep(1.0)
 
-    print("[START] Driving FORWARD with Permanent First-Color Lock & Vision Turn Exit!")
+    print("[START] Driving FORWARD with Rate-Limited Serial Transmission!")
     serial_ctrl.send_command("FORWARD")
 
     # ------------------------------------------------------------------------
@@ -180,7 +181,7 @@ def main():
     ROI3 = [redTarget - 50, 110, greenTarget + 50, 245] # Signal Pillars ROI (Standing 3D Pillars above horizon!)
     ROI4 = [200, 260, 440, 330]  # Ground Markers & Parking Lot ROI (Floor Lines)
 
-    # Navigation flags & state counters (exact open_challenge_R1.py timing model)
+    # Navigation flags & state counters
     t = 0                  # Completed turn count (3 laps x 4 turns = 12)
     turnDir = forced_dir   # Track direction ("left", "right", or "none")
     lDetected = False
@@ -189,6 +190,11 @@ def main():
     lineLockoutUntil = 0   # 3.5s line detection lockout timer
     turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
+
+    # Serial rate-limiting state tracking
+    last_sent_angle = -1
+    last_cmd_time = 0
+    last_us_mode = "NONE"
 
     # Dynamic Turn Exit Timings (Optimized for Narrow FOV Camera)
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
@@ -251,12 +257,12 @@ def main():
                         turnDir = "right"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT (Only Orange lines will be checked!)")
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT!")
                     elif blueArea > 150 and blueArea > orangeArea:
                         turnDir = "left"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT (Only Blue lines will be checked!)")
+                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT!")
                 
                 # Once locked to RIGHT (Orange first), ONLY check Orange lines for remaining laps!
                 elif turnDir == "right":
@@ -273,18 +279,19 @@ def main():
                         print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (FROM OPEN_CHALLENGE_R1)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT
             # -------------------------------------------------------------
             if isTurning:
-                # Continuously stream active turn command to refresh ESP32 500ms watchdog & lock servo angle!
                 targetTurnCmd = "TURN_LEFT" if turnDir == "left" else "TURN_RIGHT"
-                serial_ctrl.send_command(targetTurnCmd)
+                
+                # Stream active turn command every 100ms to refresh ESP32 500ms watchdog
+                if (currTime - last_cmd_time) >= 0.1:
+                    serial_ctrl.send_command(targetTurnCmd)
+                    last_cmd_time = currTime
 
                 turnElapsed = currTime - turnStartTime
 
                 # DYNAMIC TURN EXIT CONDITION:
-                # After minTurnDuration (0.8s), exit as soon as new wall is acquired (leftArea >= 600 or rightArea >= 600),
-                # OR when maxTurnDuration (2.2s) safety timeout is reached!
                 newWallAcquired = (turnElapsed >= minTurnDuration) and (leftArea >= wallReacquireArea or rightArea >= wallReacquireArea)
                 maxTimeoutReached = (turnElapsed >= maxTurnDuration)
 
@@ -307,6 +314,7 @@ def main():
                     t += 1
                     print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering {targetTurnCmd} ({t}/12)...")
                     serial_ctrl.send_command(targetTurnCmd)
+                    last_cmd_time = currTime
                     isTurning = True
                     turnStartTime = currTime
                     lDetected = False  # Reset marker flag for next straightaway!
@@ -365,9 +373,15 @@ def main():
                 # Constrain angle between safe mechanical limits (60 to 140 deg)
                 angle = max(60, min(140, angle))
 
-                # Stream continuous DRIVE command over USB Serial to ESP32
-                serial_ctrl.send_command("AUTO_US_OFF")
-                serial_ctrl.send_command(f"DRIVE:{motorSpeed}:{angle}")
+                # Rate-limiting: Send DRIVE command only when angle changes or every 100ms
+                if last_us_mode != "US_OFF":
+                    serial_ctrl.send_command("AUTO_US_OFF")
+                    last_us_mode = "US_OFF"
+
+                if angle != last_sent_angle or (currTime - last_cmd_time) >= 0.1:
+                    serial_ctrl.send_command(f"DRIVE:{motorSpeed}:{angle}")
+                    last_sent_angle = angle
+                    last_cmd_time = currTime
 
             # -------------------------------------------------------------
             # 4. FINAL LAP MAGENTA PARKING LOT ALGORITHM (t >= 12)
@@ -387,7 +401,7 @@ def main():
                     print("[FINISH] Obstacle Challenge Complete!")
                     break
 
-            # Draw ROIs & Offset Contours (matching open_challenge_R1.py)
+            # Draw ROIs & Offset Contours
             img_disp = img.copy()
             draw_roi(img_disp, ROI1, (0, 255, 255), 2)
             draw_roi(img_disp, ROI2, (0, 255, 255), 2)
