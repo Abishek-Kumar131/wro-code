@@ -148,24 +148,23 @@ def main():
             us_hardware_working = (l_us > 5 or r_us > 5) and not use_vision_walls
 
             # -------------------------------------------------------------
-            # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
+            # 1. LINE MARKER DETECTION (LOCKED TO FIRST DETECTED COLOR)
             # -------------------------------------------------------------
             if not isTurning and currTime >= lineLockoutUntil:
-                # If direction is not locked yet, lock onto whichever color is detected FIRST
                 if turnDir == "none":
+                    # First corner: Lock track direction to whichever color is detected first!
                     if orangeArea > 150 and orangeArea > blueArea:
                         turnDir = "right"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT!")
+                        print(f"[VISION MARKER] First Marker Detected: ORANGE ({orangeArea} px) -> LOCKED Track Dir = RIGHT (Orange Only)")
                     elif blueArea > 150 and blueArea > orangeArea:
                         turnDir = "left"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT!")
-                
-                # Once locked to RIGHT (Orange first), ONLY check Orange lines for remaining laps!
+                        print(f"[VISION MARKER] First Marker Detected: BLUE ({blueArea} px) -> LOCKED Track Dir = LEFT (Blue Only)")
                 elif turnDir == "right":
+                    # LOCKED TO RIGHT: Exclusively look for ORANGE lines, ignore blue!
                     if orangeArea > 150:
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
