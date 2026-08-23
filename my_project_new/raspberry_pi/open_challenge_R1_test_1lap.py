@@ -6,7 +6,7 @@ Raspberry Pi 5 Open Challenge Autonomous Navigation (1-LAP TEST SCRIPT)
 1-Lap Fast Testing Version:
 - Performs Return-to-Home after completing exactly 1 LAP (4 turns) instead of 3 laps (12 turns).
 - Perfect for quick bench and track testing!
-- Uses Start/Finish Floor Line Marker + Baseline Sensor Distance Stop Engine.
+- Uses Electronic Reverse Braking + Slow Approach Speed 175 for pin-point 0cm offset stopping accuracy.
 """
 
 import sys
@@ -22,7 +22,7 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge (1-LAP TEST NODE)")
-    print("   Architecture: 1-Lap (4 Turns) Start/Finish Line & Baseline Sensor Stop Engine")
+    print("   Architecture: Precision Finish Line Stop Engine (Electronic Braking + Speed 175)")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -126,7 +126,7 @@ def main():
 
     normalSpeed = 245      # Full straightaway speed (96% PWM)
     turnSpeed = 230        # Global turn & cornering speed (230)
-    returnSpeed = 230      # Set speed for final return segment (230)
+    returnSpeed = 175      # Slow controlled approach speed for pin-point finish stopping (175 PWM)
 
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
     maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
@@ -139,12 +139,10 @@ def main():
     is_returning_home = False          # True once final corner exit is confirmed
     corner_exit_time = 0               # Timestamp when 4th turn exit was confirmed
     home_stop_initiated = False        # True once final stop sequence is committed
-    home_stop_confirm_start = 0        # Timestamp for debounce confirmation hold
 
-    MIN_CLEAR_OF_CORNER_TIME = 0.6     # Min time after turn exit before allowing line/sensor stop (0.6s)
+    MIN_CLEAR_OF_CORNER_TIME = 0.5     # Min time after turn exit before allowing line/sensor stop (0.5s)
     FRONT_WALL_HARD_STOP_CM = 25.0     # Hard safety ceiling: stop if front wall <= 25cm
     HOME_ABSOLUTE_TIMEOUT = 4.0        # Absolute maximum timeout cap since turn exit
-    STOP_CONFIRM_HOLD = 0.15           # Fast debounce hold duration (0.15s) for accurate line stop
 
     # Serial rate-limiting variables
     last_steer_angle = None
@@ -233,12 +231,12 @@ def main():
                     print(f"[NAV EVENT] Turn {t}/{TARGET_TURNS} ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
 
                     if t >= TARGET_TURNS:
-                        # 4th corner exit confirmed (1-Lap Complete). Re-enable ultrasonics & scan for finish line marker!
+                        # 4th corner exit confirmed (1-Lap Complete). Re-enable ultrasonics & approach start line at speed 175!
                         is_returning_home = True
                         corner_exit_time = currTime
                         serial_ctrl.send_command("AUTO_US_ON")
                         print("=" * 65)
-                        print(f"[PHASE 3] 1 LAP COMPLETE ({t}/{TARGET_TURNS} Turns)! Driving down Home Stretch toward Start/Finish Line...")
+                        print(f"[PHASE 3] 1 LAP COMPLETE ({t}/{TARGET_TURNS} Turns)! Approaching Start/Finish Line at slow speed {returnSpeed}...")
                         print("[PHASE 3] Ultrasonics & Finish Line Scanner Active.")
                         print("=" * 65)
 
@@ -285,7 +283,7 @@ def main():
                     last_cmd_time = currTime
 
             # -------------------------------------------------------------
-            # 4. Phase 3: STARTING SECTION FINISH LINE STOPPING ENGINE (1-Lap Test)
+            # 4. Phase 3: PRECISION STARTING SECTION STOPPING ENGINE (1-Lap Test)
             # -------------------------------------------------------------
             if is_returning_home and not home_stop_initiated:
                 elapsed_since_corner = currTime - corner_exit_time
@@ -306,11 +304,11 @@ def main():
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and line_marker_detected:
                     reasons.append(f"START_FINISH_LINE_MARKER(O:{orangeArea},B:{blueArea})")
 
-                # (2) Primary Stop Trigger B: Baseline Sensor Snapshot Distance Match (within 6cm)
+                # (2) Primary Stop Trigger B: Baseline Sensor Snapshot Distance Match (tightened to 4cm)
                 init_b = start_snapshot.get("b", 0)
                 init_f = start_snapshot.get("f", 0)
-                b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 6.0)
-                f_match = (init_f > 0 and f_us > 0 and abs(f_us - init_f) <= 6.0)
+                b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 4.0)
+                f_match = (init_f > 0 and f_us > 0 and abs(f_us - init_f) <= 4.0)
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and (b_match or f_match):
                     reasons.append(f"BASELINE_SENSOR_MATCH(F:{f_us}/{init_f},B:{b_us}/{init_b})")
 
@@ -325,19 +323,23 @@ def main():
                 should_stop_now = len(reasons) > 0
 
                 if should_stop_now:
-                    if home_stop_confirm_start == 0:
-                        home_stop_confirm_start = currTime
-                        print(f"[PHASE 3] Finish condition met ({', '.join(reasons)}). Confirming for {STOP_CONFIRM_HOLD}s...")
-                    elif (currTime - home_stop_confirm_start) >= STOP_CONFIRM_HOLD:
-                        home_stop_initiated = True
-                        print("=" * 65)
-                        print(f"[FINISH 1-LAP TEST SUCCESS] STOPPED AT STARTING SECTION / FINISH LINE!")
-                        print(f"[FINISH METRICS] Reasons: {reasons}")
-                        print(f"[FINISH METRICS] Elapsed since Turn 4 exit: {round(elapsed_since_corner, 2)}s")
-                        print(f"[SENSORS] Current F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Home Snapshot: {start_snapshot}")
-                        print("=" * 65)
+                    home_stop_initiated = True
+                    print("=" * 65)
+                    print(f"[FINISH PRECISION STOP] Executing Active Electronic Reverse Brake Pulse!")
+                    print(f"[FINISH METRICS] Reasons: {reasons}")
+                    print(f"[FINISH METRICS] Elapsed since Turn 4 exit: {round(elapsed_since_corner, 2)}s")
+                    print(f"[SENSORS] Current F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Baseline: {start_snapshot}")
+                    print("=" * 65)
+
+                    # Active Electronic Braking Sequence:
+                    serial_ctrl.send_command("STOP")
+                    serial_ctrl.send_command("DRIVE:-180:100")  # Short 0.08s reverse pulse to cancel momentum
+                    time.sleep(0.08)
+                    serial_ctrl.send_command("STOP")
+                    last_drive_speed = 0
+                    time.sleep(0.5)
+                    break
                 else:
-                    home_stop_confirm_start = 0
                     if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != returnSpeed:
                         serial_ctrl.send_command(f"DRIVE:{returnSpeed}:{gentle_steer}")
                         last_cmd_time = currTime
@@ -345,7 +347,6 @@ def main():
                         last_steer_angle = gentle_steer
 
             elif home_stop_initiated:
-                # Genuine, repeated full stop to halt completely at start line
                 serial_ctrl.send_command("STOP")
                 last_drive_speed = 0
                 time.sleep(0.5)
