@@ -8,8 +8,9 @@ Hybrid Sensor-Vision Control Architecture:
 - Duty Cycle Optimization for Ultrasonic Sensors:
   * Phase 1 (Warmup): Active to capture home position snapshot.
   * Phase 2 (Laps 1-3): Deactivated (AUTO_US_OFF) during active vision navigation to eliminate lag.
-  * Phase 3 (Post-3-Lap Return): Re-activated to detect home arrival.
-- Post-3-Lap Return to Home Behavior:
+  * Phase 3 (Post-3-Lap Return): Re-activated after 5-second post-turn-12 delay to detect home arrival.
+- Post-3-Lap Return to Home Behavior (with 5-Second Post-Turn-12 Delay):
+  * After 12th turn completes, robot drives 5.0 seconds forward down home stretch.
   * FORWARD ONLY (No backward driving). Continues driving forward along closed circuit track.
   * Reduced Set Speed: 230 (global turnSpeed = 230).
   * Priority on Stopping: Dampened camera steering (no violent wall corrections).
@@ -32,7 +33,7 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Architecture: Post-3-Lap Home Return + Duty-Cycled Sensors (Speed 230)")
+    print("   Architecture: 5s Post-Turn-12 Delay + Return to Home (Speed 230)")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -135,6 +136,7 @@ def main():
     lDetected = False
     isTurning = False
     is_returning_home = False
+    turn12_finish_time = 0 # Timestamp when 12th turn finishes
     return_start_time = 0
     turnStartTime = 0
     lineLockoutUntil = 0   # 3.5s line detection lockout timer
@@ -178,7 +180,7 @@ def main():
             orangeArea = max_contour(cListOrange, ROI3)[0]
             blueArea = max_contour(cListBlue, ROI3)[0]
 
-            # Sensor readings (Phase 2: US sensors deactivated during active laps to eliminate processing lag)
+            # Sensor readings (Phase 2: US sensors deactivated during active laps; reactivated in Phase 3)
             us_data = serial_ctrl.get_us_data() if is_returning_home else {}
             f_us = us_data.get("f", 0)
             l_us = us_data.get("l", 0)
@@ -262,7 +264,7 @@ def main():
             # -------------------------------------------------------------
             # 3. STRAIGHTAWAY WALL AVOIDANCE & DYNAMIC SPEED CONTROL
             # -------------------------------------------------------------
-            if not isTurning and not is_returning_home and t < 12:
+            if not isTurning and not is_returning_home:
                 # Phase 2: Ultrasonics remain deactivated during 3 laps
                 serial_ctrl.send_command("AUTO_US_OFF")
 
@@ -287,57 +289,67 @@ def main():
                     last_cmd_time = currTime
 
             # -------------------------------------------------------------
-            # Phase 3: POST-3-LAP RETURN TO HOME BEHAVIOR (CRITICAL CONSTRAINTS)
+            # Phase 3: POST-3-LAP RETURN TO HOME (ACTIVATES 5.0 SECONDS AFTER TURN 12)
             # -------------------------------------------------------------
             if t >= 12 and not isTurning:
-                if not is_returning_home:
+                if turn12_finish_time == 0:
+                    turn12_finish_time = currTime
                     print("=" * 65)
-                    print("[PHASE 3] 3 Laps (12 Turns) Complete! Initiating Post-3-Lap Return to Home...")
-                    print("[CONSTRAINT A] FORWARD ONLY (Continuing forward along closed circuit track).")
-                    print(f"[CONSTRAINT B] Smoothly reducing speed to set returnSpeed = {returnSpeed}.")
-                    print("[CONSTRAINT C] Priority #1: Stopping accuracy. Dampening camera steering to maintain stable drive.")
-                    print("[CONSTRAINT D] Phase 3 Duty Cycle: Re-activating Ultrasonic Sensors to detect 2cm Home buffer...")
+                    print("[COMPLETION] 3 Laps (12 Turns) Complete! Driving 5.0s down home stretch before Return-to-Home activation...")
                     print("=" * 65)
-                    is_returning_home = True
-                    return_start_time = currTime
-                    serial_ctrl.send_command("AUTO_US_ON")  # Phase 3: Re-activate ultrasonic sensors for home detection
 
-                return_elapsed = currTime - return_start_time
-                
-                # Check sensor match with initial warm-up snapshot (within 2cm buffer)
-                init_b = start_snapshot.get("b", 0)
-                init_f = start_snapshot.get("f", 0)
-                init_l = start_snapshot.get("l", 0)
-                init_r = start_snapshot.get("r", 0)
+                time_since_turn12 = currTime - turn12_finish_time
 
-                b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 2.0)
-                f_match = (init_f > 0 and f_us > 0 and abs(f_us - init_f) <= 2.0)
-                side_match = (init_l > 0 and l_us > 0 and abs(l_us - init_l) <= 2.0) and (init_r > 0 and r_us > 0 and abs(r_us - init_r) <= 2.0)
-                
-                # Stopping accurately at recorded start position is Priority #1!
-                home_reached = (b_match or f_match or side_match or return_elapsed >= 4.0)
+                # Activate Return-to-Home Phase 3 after 5.0 seconds delay
+                if time_since_turn12 >= 5.0:
+                    if not is_returning_home:
+                        print("=" * 65)
+                        print("[PHASE 3] 5.0s Post-Turn Delay Passed! Activating Return to Home...")
+                        print("[CONSTRAINT A] FORWARD ONLY (Continuing forward along home stretch).")
+                        print(f"[CONSTRAINT B] Smoothly reducing speed to set returnSpeed = {returnSpeed} (230).")
+                        print("[CONSTRAINT C] Priority #1: Stopping accuracy. Dampening camera steering to maintain stable drive.")
+                        print("[CONSTRAINT D] Phase 3 Duty Cycle: Re-activating Ultrasonic Sensors to detect 2cm Home buffer...")
+                        print("=" * 65)
+                        is_returning_home = True
+                        return_start_time = currTime
+                        serial_ctrl.send_command("AUTO_US_ON")  # Phase 3: Re-activate ultrasonic sensors for home detection
 
-                if home_reached and return_elapsed >= 0.5:
-                    print("=" * 65)
-                    print(f"[FINISH] ACCURATELY STOPPED AT RECORDED HOME POSITION IN {round(return_elapsed, 2)}s!")
-                    print(f"[HOME METRICS] Current Sensors: F:{f_us} L:{l_us} R:{r_us} B:{b_us}")
-                    print(f"[BASELINE SNAPSHOT] Start Snapshot: {start_snapshot}")
-                    print("=" * 65)
-                    serial_ctrl.send_command("STOP")
-                    time.sleep(0.5)
-                    break
-                else:
-                    # Constraint C: Heavily dampened, stable steering (NO violent camera steering!)
-                    aDiff = rightArea - leftArea
-                    gentle_steer = int(100 - (aDiff * 0.005))   # Heavily dampened gain 0.005
-                    gentle_steer = max(85, min(115, gentle_steer)) # Strict stable bounds [85, 115]
+                    return_elapsed = currTime - return_start_time
+                    
+                    # Check sensor match with initial warm-up snapshot (within 2cm buffer)
+                    init_b = start_snapshot.get("b", 0)
+                    init_f = start_snapshot.get("f", 0)
+                    init_l = start_snapshot.get("l", 0)
+                    init_r = start_snapshot.get("r", 0)
 
-                    # Constraint A & B: Forward drive at slow set speed 230
-                    if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != returnSpeed:
-                        serial_ctrl.send_command(f"DRIVE:{returnSpeed}:{gentle_steer}")
-                        last_cmd_time = currTime
-                        last_drive_speed = returnSpeed
-                        last_steer_angle = gentle_steer
+                    b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 2.0)
+                    f_match = (init_f > 0 and f_us > 0 and abs(f_us - init_f) <= 2.0)
+                    side_match = (init_l > 0 and l_us > 0 and abs(l_us - init_l) <= 2.0) and (init_r > 0 and r_us > 0 and abs(r_us - init_r) <= 2.0)
+                    
+                    # Stopping accurately at recorded start position is Priority #1!
+                    home_reached = (b_match or f_match or side_match or return_elapsed >= 4.0)
+
+                    if home_reached and return_elapsed >= 0.5:
+                        print("=" * 65)
+                        print(f"[FINISH] ACCURATELY STOPPED AT RECORDED HOME POSITION IN {round(return_elapsed, 2)}s!")
+                        print(f"[HOME METRICS] Current Sensors: F:{f_us} L:{l_us} R:{r_us} B:{b_us}")
+                        print(f"[BASELINE SNAPSHOT] Start Snapshot: {start_snapshot}")
+                        print("=" * 65)
+                        serial_ctrl.send_command("STOP")
+                        time.sleep(0.5)
+                        break
+                    else:
+                        # Constraint C: Heavily dampened, stable steering (NO violent camera steering!)
+                        aDiff = rightArea - leftArea
+                        gentle_steer = int(100 - (aDiff * 0.005))   # Heavily dampened gain 0.005
+                        gentle_steer = max(85, min(115, gentle_steer)) # Strict stable bounds [85, 115]
+
+                        # Constraint A & B: Forward drive at slow set speed 230
+                        if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != returnSpeed:
+                            serial_ctrl.send_command(f"DRIVE:{returnSpeed}:{gentle_steer}")
+                            last_cmd_time = currTime
+                            last_drive_speed = returnSpeed
+                            last_steer_angle = gentle_steer
 
             # Draw ROIs & Offset Contours (matching my_old_contour_colorvals_crt.py)
             img_disp = img.copy()
@@ -355,6 +367,9 @@ def main():
             
             if is_returning_home:
                 state_str = f"RETURN_TO_HOME ({returnSpeed})"
+            elif t >= 12 and not isTurning:
+                t_del = round(currTime - turn12_finish_time, 1)
+                state_str = f"HOME_STRETCH ({t_del}s/5.0s)"
             elif isTurning:
                 t_ela = round(currTime - turnStartTime, 1)
                 state_str = f"TURNING ({turnDir.upper()} {t_ela}s)"
