@@ -126,7 +126,7 @@ def main():
 
     normalSpeed = 245      # Full straightaway speed (96% PWM)
     turnSpeed = 230        # Global turn & cornering speed (230)
-    returnSpeed = 175      # Slow controlled approach speed for pin-point finish stopping (175 PWM)
+    returnSpeed = 230      # Slow controlled approach speed for pin-point finish stopping (230 PWM)
 
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
     maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
