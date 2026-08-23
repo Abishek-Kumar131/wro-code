@@ -228,7 +228,7 @@ def main():
                     # rightArea > leftArea => Too close to Right wall => Steer LEFT (<100)
                     aDiff = rightArea - leftArea  # Negative when close to left wall
                     steer_angle = int(100 - (aDiff * 0.02))
-                    steer_angle = max(70, min(130, steer_angle))
+                    steer_angle = max(60, min(140, steer_angle))
                     serial_ctrl.send_command(f"DRIVE:245:{steer_angle}")
 
             # Draw ROIs & Offset Contours (matching my_old_contour_colorvals_crt.py)

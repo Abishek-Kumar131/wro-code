@@ -160,8 +160,8 @@ def main():
     greenTarget = 530  # Target X position for Green Pillars (Keep on RIGHT)
 
     straightConst = 100 # Steering center (100 degrees)
-    sharpRight = 70    # Sharp right steering lock (+-30 deg max deflection)
-    sharpLeft = 130    # Sharp left steering lock (+-30 deg max deflection)
+    sharpRight = 60    # Sharp right steering lock
+    sharpLeft = 140    # Sharp left steering lock
     motorSpeed = 245   # Motor PWM speed
 
     # PD Wall-Centering gains
@@ -362,8 +362,8 @@ def main():
                     serial_ctrl.send_command("FORWARD")
                     continue
 
-                # Constrain angle between safe mechanical limits (70 to 130 deg, +-30 max)
-                angle = max(70, min(130, angle))
+                # Constrain angle between safe mechanical limits (60 to 140 deg)
+                angle = max(60, min(140, angle))
 
                 # Stream continuous DRIVE command over USB Serial to ESP32
                 serial_ctrl.send_command("AUTO_US_OFF")

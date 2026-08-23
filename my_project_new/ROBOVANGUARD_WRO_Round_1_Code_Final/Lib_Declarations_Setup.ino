@@ -120,8 +120,8 @@ void motor_stop() {
 
 // Servo Functions using Hardware LEDC (50Hz, 14-bit)
 void moveServoTo(int angle) {
-  // Constrain the angle between safe mechanical steering limits (+-30 deg from 100 deg center: 70 to 130 deg)
-  angle = constrain(angle, 70, 130);
+  // Constrain the angle between safe mechanical steering limits (+-40 deg from 100 deg center: 60 to 140 deg)
+  angle = constrain(angle, 60, 140);
   // Map angle (0 - 180 deg) to standard servo pulse width (500us to 2400us)
   long pulse_us = map(angle, 0, 180, 500, 2400);
   // Convert pulse width (in microseconds) to 14-bit duty cycle at 50Hz (20,000us period):
