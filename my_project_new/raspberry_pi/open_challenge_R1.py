@@ -3,18 +3,11 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
-Robust Architecture (Integrating new_logic.py):
-1. BUGFIX: Turn-trigger condition guarded on `t < 12` to prevent phantom 13th turn.
-2. WRO RULE 9.24.2 / 9.22 COMPLIANT RETURN TO HOME:
-   - Vehicle full footprint stops reliably inside the finish (=start) SECTION.
-   - Bounded & Debounced stop decision based on calibrated home drive time (1.6s),
-     minimum corner clearance time (0.8s), and front wall hard safety stop (25cm).
-3. IMMEDIATE ULTRASONIC RE-ACTIVATION:
-   - Ultrasonics re-enabled immediately once 12th turn exit is confirmed (wall re-acquired).
-4. DYNAMIC ANTI-DRIFT SPEED CONTROL:
-   - Reduces speed to turnSpeed (230) on sharp turns (>30° deflection).
-5. PERMANENT FIRST-COLOR DIRECTION LOCK:
-   - Locks onto whichever marker color (Orange/Blue) is detected first.
+WRO 2026 Starting Section Finish Engine:
+1. Floor Line Marker Trigger (Primary): Detects Orange/Blue Start-Finish Line marker in ROI3 after 12th turn.
+2. Baseline Sensor Match Trigger (Secondary): Matches starting snapshot (Front/Back US sensors) within 6cm buffer.
+3. Safety Hard Wall Stop: Stops if front wall clearance <= 25cm to prevent wall collision.
+4. Phantom Turn Guard: Guarded with `t < 12` so 13th turn can NEVER trigger on the home stretch.
 """
 
 import sys
@@ -30,7 +23,7 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Architecture: Robust Bounded & Debounced Return-to-Home")
+    print("   Architecture: WRO Start/Finish Section Line & Baseline Sensor Stop Engine")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -84,7 +77,7 @@ def main():
     # Phase 1: Setup & Warmup Countdown (Record Initial Start Position Snapshot)
     # ------------------------------------------------------------------------
     print("\n[READY] Sensor-Vision Engine Ready!")
-    print("[PHASE 1] Recording Baseline Start Position...")
+    print("[PHASE 1] Recording Baseline Start Position Snapshot...")
 
     start_snapshot = {"f": 0, "f1": 0, "f2": 0, "l": 0, "r": 0, "b": 0}
 
@@ -109,7 +102,7 @@ def main():
             cv2.waitKey(1)
         time.sleep(1.0)
 
-    print(f"[START SNAPSHOT] Baseline (used as optional lateral cross-check): {start_snapshot}")
+    print(f"[START SNAPSHOT] Home Baseline Position Recorded: {start_snapshot}")
 
     # ------------------------------------------------------------------------
     # Phase 2: Start Active Driving (Ultrasonics deactivated during laps)
@@ -141,18 +134,17 @@ def main():
     turnThresh = 200       # Area threshold below which wall end is detected
 
     # ------------------------------------------------------------------------
-    # Phase 3 Parameters (WRO 9.24.2 / 9.22 Bounded & Debounced Return Engine)
+    # Phase 3 Parameters (WRO Start/Finish Section Detection Engine)
     # ------------------------------------------------------------------------
     is_returning_home = False          # True once 12th (final) corner exit is confirmed
     corner12_exit_time = 0             # Timestamp when 12th turn exit was confirmed
     home_stop_initiated = False        # True once final stop sequence is committed
     home_stop_confirm_start = 0        # Timestamp for debounce confirmation hold
 
-    MIN_CLEAR_OF_CORNER_TIME = 0.8     # Min time after turn-12 exit before allowing stop (clears corner section)
-    TARGET_HOME_DRIVE_TIME = 1.6       # Primary target drive time to reach middle of home section at returnSpeed
-    FRONT_WALL_HARD_STOP_CM = 25.0     # Hard safety ceiling: stop if front wall <= 25cm to prevent ramming wall
-    HOME_ABSOLUTE_TIMEOUT = 4.5        # Absolute maximum timeout cap since turn-12 exit
-    STOP_CONFIRM_HOLD = 0.25           # Debounce hold duration (0.25s) before committing stop
+    MIN_CLEAR_OF_CORNER_TIME = 0.6     # Min time after turn-12 exit before allowing line/sensor stop (0.6s)
+    FRONT_WALL_HARD_STOP_CM = 25.0     # Hard safety ceiling: stop if front wall <= 25cm
+    HOME_ABSOLUTE_TIMEOUT = 4.0        # Absolute maximum timeout cap since turn-12 exit
+    STOP_CONFIRM_HOLD = 0.15           # Fast debounce hold duration (0.15s) for accurate line stop
 
     # Serial rate-limiting variables
     last_steer_angle = None
@@ -189,7 +181,7 @@ def main():
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
-            #    (Guarded with t < 12 so it never fires once 12 turns are complete)
+            #    (Guarded with t < 12 so it never fires past 12 turns)
             # -------------------------------------------------------------
             if t < 12 and not isTurning and not is_returning_home and currTime >= lineLockoutUntil:
                 if turnDir == "none":
@@ -242,13 +234,13 @@ def main():
                     print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
 
                     if t >= 12:
-                        # 12th (final) corner exit confirmed. Re-enable ultrasonics immediately!
+                        # 12th (final) corner exit confirmed. Re-enable ultrasonics & scan for finish line marker!
                         is_returning_home = True
                         corner12_exit_time = currTime
                         serial_ctrl.send_command("AUTO_US_ON")
                         print("=" * 65)
-                        print("[PHASE 3] Final corner cleared! Entering finish straight.")
-                        print("[PHASE 3] Ultrasonics reactivated immediately for home section detection.")
+                        print("[PHASE 3] Final corner cleared! Driving down Home Stretch toward Start/Finish Line...")
+                        print("[PHASE 3] Ultrasonics & Finish Line Scanner Active.")
                         print("=" * 65)
 
             # BUGFIX: Guarded with `t < 12` so a phantom 13th turn can NEVER trigger!
@@ -294,44 +286,56 @@ def main():
                     last_cmd_time = currTime
 
             # -------------------------------------------------------------
-            # 4. Phase 3 (REWRITTEN): Bounded & Debounced Return-to-Home
-            #    (WRO Rule 9.24.2 / 9.22 Compliant Stop inside Finish Section)
+            # 4. Phase 3: STARTING SECTION FINISH LINE STOPPING ENGINE
             # -------------------------------------------------------------
             if is_returning_home and not home_stop_initiated:
                 elapsed_since_corner = currTime - corner12_exit_time
 
-                # Gentle, dampened camera steering for smooth straight drive into finish section
+                # Gentle wall centering steering on the home stretch
                 aDiff = rightArea - leftArea
-                gentle_steer = int(100 - (aDiff * 0.005))
-                gentle_steer = max(85, min(115, gentle_steer))
+                gentle_steer = int(100 - (aDiff * 0.01))
+                gentle_steer = max(80, min(120, gentle_steer))
 
-                front_reading_valid = f_us > 0
                 reasons = []
 
-                # (a) Hard safety ceiling: stop if front wall <= 25cm to avoid ramming wall
-                if front_reading_valid and f_us <= FRONT_WALL_HARD_STOP_CM:
-                    reasons.append("FRONT_WALL_PROXIMITY")
+                # (1) Primary Stop Trigger A: Start/Finish Floor Line Marker Detection in ROI3!
+                line_marker_detected = (
+                    (turnDir == "right" and orangeArea > 150) or
+                    (turnDir == "left" and blueArea > 150) or
+                    (turnDir == "none" and (orangeArea > 150 or blueArea > 150))
+                )
+                if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and line_marker_detected:
+                    reasons.append(f"START_FINISH_LINE_MARKER(O:{orangeArea},B:{blueArea})")
 
-                # (b) Primary target drive time reached (middle of home section)
-                if elapsed_since_corner >= max(TARGET_HOME_DRIVE_TIME, MIN_CLEAR_OF_CORNER_TIME):
-                    reasons.append("TARGET_DRIVE_TIME")
+                # (2) Primary Stop Trigger B: Baseline Sensor Snapshot Distance Match (within 6cm)
+                init_b = start_snapshot.get("b", 0)
+                init_f = start_snapshot.get("f", 0)
+                b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 6.0)
+                f_match = (init_f > 0 and f_us > 0 and abs(f_us - init_f) <= 6.0)
+                if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and (b_match or f_match):
+                    reasons.append(f"BASELINE_SENSOR_MATCH(F:{f_us}/{init_f},B:{b_us}/{init_b})")
 
-                # (c) Absolute safety timeout cap
+                # (3) Safety Ceiling A: Front wall clearance <= 25cm (prevents hitting far wall)
+                if f_us > 0 and f_us <= FRONT_WALL_HARD_STOP_CM:
+                    reasons.append(f"FRONT_WALL_PROXIMITY({f_us}cm)")
+
+                # (4) Safety Ceiling B: Timeout cap (4.0 seconds max)
                 if elapsed_since_corner >= HOME_ABSOLUTE_TIMEOUT:
-                    reasons.append("ABSOLUTE_TIMEOUT")
+                    reasons.append("SAFETY_TIMEOUT_CAP")
 
-                should_stop_now = (elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and len(reasons) > 0)
+                should_stop_now = len(reasons) > 0
 
                 if should_stop_now:
                     if home_stop_confirm_start == 0:
                         home_stop_confirm_start = currTime
-                        print(f"[PHASE 3] Stop condition met ({', '.join(reasons)}). Confirming for {STOP_CONFIRM_HOLD}s...")
+                        print(f"[PHASE 3] Finish condition met ({', '.join(reasons)}). Confirming for {STOP_CONFIRM_HOLD}s...")
                     elif (currTime - home_stop_confirm_start) >= STOP_CONFIRM_HOLD:
                         home_stop_initiated = True
                         print("=" * 65)
-                        print(f"[FINISH] STOPPED FULLY INSIDE FINISH SECTION! Reasons: {reasons}")
-                        print(f"[FINISH] Elapsed since 12th corner exit: {round(elapsed_since_corner, 2)}s")
-                        print(f"[SENSORS] F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Home Snapshot: {start_snapshot}")
+                        print(f"[FINISH SUCCESS] STOPPED AT STARTING SECTION / FINISH LINE!")
+                        print(f"[FINISH METRICS] Reasons: {reasons}")
+                        print(f"[FINISH METRICS] Elapsed since Turn 12 exit: {round(elapsed_since_corner, 2)}s")
+                        print(f"[SENSORS] Current F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Home Snapshot: {start_snapshot}")
                         print("=" * 65)
                 else:
                     home_stop_confirm_start = 0
@@ -342,7 +346,7 @@ def main():
                         last_steer_angle = gentle_steer
 
             elif home_stop_initiated:
-                # Genuine, repeated full stop to guarantee vehicle halts completely
+                # Genuine, repeated full stop to halt completely at start line
                 serial_ctrl.send_command("STOP")
                 last_drive_speed = 0
                 time.sleep(0.5)
@@ -408,7 +412,7 @@ def main():
                 "US Left (cm)": l_us,
                 "US Right (cm)": r_us,
                 "US Back (cm)": b_us,
-                "Home Reference": start_snapshot
+                "Home Baseline": start_snapshot
             })
 
             time.sleep(0.02)  # 50 Hz vision loop
