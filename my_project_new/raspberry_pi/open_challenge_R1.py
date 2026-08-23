@@ -4,13 +4,19 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 Hybrid Sensor-Vision Control Architecture:
-- Dynamic Anti-Drift Speed Reduction: Automatically reduces motor speed from 245 to 195
-  when steering angle deflection exceeds 30 degrees (angle < 70 or angle > 130) or during corner turns.
+- Position Tracking & Home Baseline Snapshot: Recorded during warm-up countdown (f1, f2, L, R, B).
+- Duty Cycle Optimization for Ultrasonic Sensors:
+  * Phase 1 (Warmup): Active to capture home position snapshot.
+  * Phase 2 (Laps 1-3): Deactivated (AUTO_US_OFF) during active vision navigation to eliminate lag.
+  * Phase 3 (Post-3-Lap Return): Re-activated to detect home arrival.
+- Post-3-Lap Return to Home Behavior:
+  * FORWARD ONLY (No backward driving). Continues driving forward along closed circuit track.
+  * Reduced Set Speed: 230 (global turnSpeed = 230).
+  * Priority on Stopping: Dampened camera steering (no violent wall corrections).
+  * Stopping Accuracy: Halts bot completely when sensors match initial snapshot within 2cm buffer.
+- Dynamic Anti-Drift Speed Control: Reduces speed to turnSpeed (230) on sharp turns (>30° deflection).
 - Permanent First-Color Direction Lock: Locks onto whichever marker color (Orange/Blue) is detected first.
-- Vision-Dynamic Corner Exit: Dynamically exits corner turns when the camera
-  re-acquires the new straightaway wall (min 0.8s, max 2.2s).
-- Decoupled Line Lockout (3.5s) and Turn Cooldown (3.5s) timers.
-- Camera Vision Wall Avoidance: Dynamically calculates steering angle to deflect AWAY from black walls.
+- Vision-Dynamic Corner Exit: Dynamically exits corner turns when camera re-acquires new straightaway wall.
 """
 
 import sys
@@ -26,7 +32,7 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Architecture: Anti-Drift Dynamic Speed Control + Dynamic Vision Turn Exit")
+    print("   Architecture: Post-3-Lap Home Return + Duty-Cycled Sensors (Speed 230)")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -77,11 +83,30 @@ def main():
                 cv2.waitKey(1)
         time.sleep(0.04)
 
-    # 3. Safety Countdown before bot starts driving
-    print("\n[READY] Hybrid Sensor-Vision Engine Ready!")
+    # ------------------------------------------------------------------------
+    # Phase 1: Setup & Warmup Countdown (Record Initial Start Position Snapshot)
+    # ------------------------------------------------------------------------
+    print("\n[READY] Sensor-Vision Engine Ready!")
+    print("[PHASE 1] Recording Baseline Start Position (f1, f2, L, R, B)...")
+    
+    start_snapshot = {"f": 0, "f1": 0, "f2": 0, "l": 0, "r": 0, "b": 0}
+    
     print("[COUNTDOWN] Bot starts driving in 3 seconds... (Press 'q' to abort, 'l'/'r' to set dir)")
     for c in range(3, 0, -1):
         print(f"[COUNTDOWN] {c}...")
+        
+        # Read baseline sensor values during countdown
+        us_data = serial_ctrl.get_us_data()
+        f_val = us_data.get("f", 0)
+        start_snapshot = {
+            "f": f_val,
+            "f1": us_data.get("f1", f_val),
+            "f2": us_data.get("f2", f_val),
+            "l": us_data.get("l", 0),
+            "r": us_data.get("r", 0),
+            "b": us_data.get("b", 0)
+        }
+
         if show_monitor_display and warmup_frame is not None:
             cd_img = warmup_frame.copy()
             cv2.putText(cd_img, f"STARTING IN {c} SECONDS...", (50, 240),
@@ -90,8 +115,13 @@ def main():
             cv2.waitKey(1)
         time.sleep(1.0)
 
-    # 4. Start robot driving forward
-    print("[START] Driving FORWARD with Dynamic Anti-Drift Speed Control!")
+    print(f"[START SNAPSHOT] Baseline Home Position Recorded: {start_snapshot}")
+
+    # ------------------------------------------------------------------------
+    # Phase 2: Start Active Driving (Ultrasonic Sensors Deactivated during Laps)
+    # ------------------------------------------------------------------------
+    print("[START] Driving FORWARD (Phase 2: Duty Cycle - Ultrasonics Deactivated for Zero-Lag Vision)!")
+    serial_ctrl.send_command("AUTO_US_OFF")
     serial_ctrl.send_command("FORWARD")
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
@@ -104,14 +134,17 @@ def main():
     turnDir = forced_dir   # Track direction ("left", "right", or "none")
     lDetected = False
     isTurning = False
+    is_returning_home = False
+    return_start_time = 0
     turnStartTime = 0
     lineLockoutUntil = 0   # 3.5s line detection lockout timer
     turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
     
-    # Speed Parameters (Anti-Drift Speed Control)
+    # Speed Parameters (Global turnSpeed updated to 230)
     normalSpeed = 245      # Full straightaway speed (96% PWM)
-    turnSpeed = 195        # Reduced cornering speed when steering deflection > 30° to prevent drifting!
+    turnSpeed = 230        # Global turn & cornering speed (updated to 230 across script)
+    returnSpeed = 230      # Set speed for final forward return segment (230)
 
     # Dynamic Turn Exit Timings (Optimized for Narrow FOV Camera)
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
@@ -123,7 +156,6 @@ def main():
     last_steer_angle = None
     last_drive_speed = None
     last_cmd_time = 0
-    last_us_mode = None
 
     try:
         while True:
@@ -146,18 +178,17 @@ def main():
             orangeArea = max_contour(cListOrange, ROI3)[0]
             blueArea = max_contour(cListBlue, ROI3)[0]
 
-            # Get latest ultrasonic sensor telemetry from ESP32
-            us_data = serial_ctrl.get_us_data()
+            # Sensor readings (Phase 2: US sensors deactivated during active laps to eliminate processing lag)
+            us_data = serial_ctrl.get_us_data() if is_returning_home else {}
             f_us = us_data.get("f", 0)
             l_us = us_data.get("l", 0)
             r_us = us_data.get("r", 0)
             b_us = us_data.get("b", 0)
-            us_hardware_working = (l_us > 5 or r_us > 5) and not use_vision_walls
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
             # -------------------------------------------------------------
-            if not isTurning and currTime >= lineLockoutUntil:
+            if not isTurning and not is_returning_home and currTime >= lineLockoutUntil:
                 if turnDir == "none":
                     if orangeArea > 150 and orangeArea > blueArea:
                         turnDir = "right"
@@ -183,12 +214,12 @@ def main():
                         print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (REDUCED TURN SPEED)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (turnSpeed = 230)
             # -------------------------------------------------------------
-            if isTurning:
+            if isTurning and not is_returning_home:
                 targetTurnAngle = 140 if turnDir == "left" else 60
                 
-                # Stream active corner turn at reduced speed (195) to prevent drifting!
+                # Stream active corner turn at set turnSpeed (230)
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
@@ -208,7 +239,7 @@ def main():
                     exit_reason = "WALL_REACQUIRED" if newWallAcquired else "MAX_TIMEOUT"
                     print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
             
-            elif currTime >= turnCooldownUntil:
+            elif currTime >= turnCooldownUntil and not is_returning_home:
                 # Wall drop check (wall area drops below turnThresh)
                 wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
                                    (turnDir == "left" and leftArea <= turnThresh) or \
@@ -218,7 +249,7 @@ def main():
                 if (lDetected or forced_dir != "none") and wallDropDetected:
                     targetTurnAngle = 140 if turnDir == "left" else 60
                     t += 1
-                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/12) at speed {turnSpeed}...")
+                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/12) at turnSpeed={turnSpeed}...")
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
                     last_drive_speed = turnSpeed
@@ -229,38 +260,84 @@ def main():
                     turnCooldownUntil = currTime + maxTurnDuration + lockoutDuration
 
             # -------------------------------------------------------------
-            # 3. STRAIGHTAWAY WALL AVOIDANCE & DYNAMIC ANTI-DRIFT SPEED CONTROL
+            # 3. STRAIGHTAWAY WALL AVOIDANCE & DYNAMIC SPEED CONTROL
             # -------------------------------------------------------------
-            if not isTurning:
-                if us_hardware_working:
-                    if last_us_mode != "US_ON":
-                        serial_ctrl.send_command("AUTO_US_ON")
-                        serial_ctrl.send_command("FORWARD")
-                        last_us_mode = "US_ON"
+            if not isTurning and not is_returning_home and t < 12:
+                # Phase 2: Ultrasonics remain deactivated during 3 laps
+                serial_ctrl.send_command("AUTO_US_OFF")
+
+                aDiff = rightArea - leftArea  # Negative when close to left wall
+                steer_angle = int(100 - (aDiff * 0.02))
+                steer_angle = max(60, min(140, steer_angle))
+
+                # DYNAMIC SPEED CONTROL:
+                # When steer angle deflection > 30° (angle < 70 or angle > 130), reduce speed to turnSpeed (230)!
+                steerDeflection = abs(steer_angle - 100)
+                currentSpeed = turnSpeed if steerDeflection > 30 else normalSpeed
+
+                # Rate-limiting: Send DRIVE command only when angle/speed changes or every 100ms
+                angle_changed = last_steer_angle is None or abs(steer_angle - last_steer_angle) >= 2
+                speed_changed = last_drive_speed != currentSpeed
+                time_elapsed = (currTime - last_cmd_time) >= 0.1
+
+                if angle_changed or speed_changed or time_elapsed:
+                    serial_ctrl.send_command(f"DRIVE:{currentSpeed}:{steer_angle}")
+                    last_steer_angle = steer_angle
+                    last_drive_speed = currentSpeed
+                    last_cmd_time = currTime
+
+            # -------------------------------------------------------------
+            # Phase 3: POST-3-LAP RETURN TO HOME BEHAVIOR (CRITICAL CONSTRAINTS)
+            # -------------------------------------------------------------
+            if t >= 12 and not isTurning:
+                if not is_returning_home:
+                    print("=" * 65)
+                    print("[PHASE 3] 3 Laps (12 Turns) Complete! Initiating Post-3-Lap Return to Home...")
+                    print("[CONSTRAINT A] FORWARD ONLY (Continuing forward along closed circuit track).")
+                    print(f"[CONSTRAINT B] Smoothly reducing speed to set returnSpeed = {returnSpeed}.")
+                    print("[CONSTRAINT C] Priority #1: Stopping accuracy. Dampening camera steering to maintain stable drive.")
+                    print("[CONSTRAINT D] Phase 3 Duty Cycle: Re-activating Ultrasonic Sensors to detect 2cm Home buffer...")
+                    print("=" * 65)
+                    is_returning_home = True
+                    return_start_time = currTime
+                    serial_ctrl.send_command("AUTO_US_ON")  # Phase 3: Re-activate ultrasonic sensors for home detection
+
+                return_elapsed = currTime - return_start_time
+                
+                # Check sensor match with initial warm-up snapshot (within 2cm buffer)
+                init_b = start_snapshot.get("b", 0)
+                init_f = start_snapshot.get("f", 0)
+                init_l = start_snapshot.get("l", 0)
+                init_r = start_snapshot.get("r", 0)
+
+                b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 2.0)
+                f_match = (init_f > 0 and f_us > 0 and abs(f_us - init_f) <= 2.0)
+                side_match = (init_l > 0 and l_us > 0 and abs(l_us - init_l) <= 2.0) and (init_r > 0 and r_us > 0 and abs(r_us - init_r) <= 2.0)
+                
+                # Stopping accurately at recorded start position is Priority #1!
+                home_reached = (b_match or f_match or side_match or return_elapsed >= 4.0)
+
+                if home_reached and return_elapsed >= 0.5:
+                    print("=" * 65)
+                    print(f"[FINISH] ACCURATELY STOPPED AT RECORDED HOME POSITION IN {round(return_elapsed, 2)}s!")
+                    print(f"[HOME METRICS] Current Sensors: F:{f_us} L:{l_us} R:{r_us} B:{b_us}")
+                    print(f"[BASELINE SNAPSHOT] Start Snapshot: {start_snapshot}")
+                    print("=" * 65)
+                    serial_ctrl.send_command("STOP")
+                    time.sleep(0.5)
+                    break
                 else:
-                    if last_us_mode != "US_OFF":
-                        serial_ctrl.send_command("AUTO_US_OFF")
-                        last_us_mode = "US_OFF"
+                    # Constraint C: Heavily dampened, stable steering (NO violent camera steering!)
+                    aDiff = rightArea - leftArea
+                    gentle_steer = int(100 - (aDiff * 0.005))   # Heavily dampened gain 0.005
+                    gentle_steer = max(85, min(115, gentle_steer)) # Strict stable bounds [85, 115]
 
-                    aDiff = rightArea - leftArea  # Negative when close to left wall
-                    steer_angle = int(100 - (aDiff * 0.02))
-                    steer_angle = max(60, min(140, steer_angle))
-
-                    # DYNAMIC ANTI-DRIFT SPEED CONTROL:
-                    # When steer angle deflection > 30° (angle < 70 or angle > 130), reduce speed to 195!
-                    steerDeflection = abs(steer_angle - 100)
-                    currentSpeed = turnSpeed if steerDeflection > 30 else normalSpeed
-
-                    # Rate-limiting: Send DRIVE command only when angle/speed changes or every 100ms
-                    angle_changed = last_steer_angle is None or abs(steer_angle - last_steer_angle) >= 2
-                    speed_changed = last_drive_speed != currentSpeed
-                    time_elapsed = (currTime - last_cmd_time) >= 0.1
-
-                    if angle_changed or speed_changed or time_elapsed:
-                        serial_ctrl.send_command(f"DRIVE:{currentSpeed}:{steer_angle}")
-                        last_steer_angle = steer_angle
-                        last_drive_speed = currentSpeed
+                    # Constraint A & B: Forward drive at slow set speed 230
+                    if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != returnSpeed:
+                        serial_ctrl.send_command(f"DRIVE:{returnSpeed}:{gentle_steer}")
                         last_cmd_time = currTime
+                        last_drive_speed = returnSpeed
+                        last_steer_angle = gentle_steer
 
             # Draw ROIs & Offset Contours (matching my_old_contour_colorvals_crt.py)
             img_disp = img.copy()
@@ -275,13 +352,14 @@ def main():
             cam_type = "WEBCAM" if camera.is_webcam else "PICAM2"
             lock_rem = max(0.0, round(lineLockoutUntil - currTime, 1))
             lock_str = f"LOCKED({lock_rem}s)" if lock_rem > 0 else "READY"
-            us_mode_str = "US_CENTERING" if us_hardware_working else "VISION_WALLS"
             
-            if isTurning:
+            if is_returning_home:
+                state_str = f"RETURN_TO_HOME ({returnSpeed})"
+            elif isTurning:
                 t_ela = round(currTime - turnStartTime, 1)
                 state_str = f"TURNING ({turnDir.upper()} {t_ela}s)"
             else:
-                state_str = f"{us_mode_str} ({turnDir.upper()})"
+                state_str = f"VISION_WALLS ({turnDir.upper()})"
             
             active_speed = last_drive_speed if last_drive_speed is not None else normalSpeed
             telemetry_text = f"Cam:{cam_type} | State:{state_str} | Speed:{active_speed} | Turns:{t}/12"
@@ -315,21 +393,14 @@ def main():
                 "Turn Count": f"{t}/12",
                 "Line Lockout": lock_str,
                 "Line Detected": lDetected,
-                "Wall Steering Mode": us_mode_str,
                 "Left Wall Area (px)": leftArea,
                 "Right Wall Area (px)": rightArea,
                 "US Front (cm)": f_us,
                 "US Left (cm)": l_us,
                 "US Right (cm)": r_us,
-                "US Back (cm)": b_us
+                "US Back (cm)": b_us,
+                "Home Snapshot": start_snapshot
             })
-
-            # Stop after 3 full laps (12 turns)
-            if t >= 12 and not isTurning:
-                print(f"[FINISH] Completed 12 turns (3 laps). Stopping bot!")
-                time.sleep(1.0)
-                serial_ctrl.send_command("STOP")
-                break
 
             time.sleep(0.02)  # 50 Hz vision loop
 
