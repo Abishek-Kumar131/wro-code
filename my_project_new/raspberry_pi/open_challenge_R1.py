@@ -3,15 +3,16 @@
 ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
-WRO 2026 Starting Section Precision Stop Engine:
-1. Controlled Finish Approach Speed: Slows to returnSpeed = 175 for smooth finish approach.
-2. Zero-Delay Stop Trigger: Triggers instant stop upon finish line marker or 4cm baseline sensor match.
-3. Active Electronic Reverse Braking: Sends short 0.08s reverse pulse (-180 PWM) to cancel motor coasting momentum completely.
-4. Phantom Turn Guard: Guarded with `t < 12` so 13th turn can NEVER trigger on the home stretch.
+WRO 2026 Competition Run Architecture:
+1. Competition Button Trigger: Pi 5 idles waiting for physical GPIO button press (default GPIO 17) or terminal ENTER key.
+2. ESP32 Handshake: ESP32 stays in idle STOP state until Pi 5 button is pressed.
+3. Baseline Position Snapshot: Recorded during warm-up countdown.
+4. Precision Finish Line Stop: Uses speed 175 + active electronic reverse brake pulse to halt 0cm offset at start line.
 """
 
 import sys
 import time
+import select
 import cv2
 import numpy as np
 from wro_serial import WROSerialController
@@ -20,14 +21,76 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
                            draw_offset_contours, display_variables)
 
 
+def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camera=None):
+    """Waits for a physical push button press on Pi 5 GPIO pin (or ENTER key / GUI key) before starting."""
+    print("=" * 65)
+    print(f"[COMPETITION STANDBY] Waiting for physical button press on GPIO {gpio_pin}...")
+    print("  -> Press physical button on GPIO 17")
+    print("  -> Or press ENTER in terminal / 's' in display window to start!")
+    print("=" * 65)
+
+    button_obj = None
+    try:
+        from gpiozero import Button
+        button_obj = Button(gpio_pin, pull_up=True)
+        print(f"[GPIO] Listening on GPIO {gpio_pin} (Pull-Up enabled via gpiozero).")
+    except Exception:
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(gpio_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            print(f"[GPIO] Listening on GPIO {gpio_pin} (Pull-Up enabled via RPi.GPIO).")
+        except Exception as e:
+            print(f"[GPIO INFO] Hardware GPIO library not loaded ({e}). Keyboard/terminal trigger active.")
+
+    while True:
+        # 1. Check physical hardware button press on Pi 5
+        if button_obj is not None and button_obj.is_pressed:
+            print("\n[BUTTON] PHYSICAL BUTTON PRESSED! Launching Competition Run...")
+            return True
+
+        # 2. Check terminal stdin (ENTER key) non-blockingly
+        if sys.stdin in select.select([sys.stdin], [], [], 0.02)[0]:
+            line = sys.stdin.readline()
+            print("\n[TERMINAL] Start command received via ENTER key! Launching...")
+            return True
+
+        # 3. Check OpenCV monitor window keypress ('s' or spacebar to start)
+        if show_display and window_name and camera:
+            img = camera.capture_array()
+            if img is not None:
+                img_disp = img.copy()
+                cv2.putText(img_disp, f"COMPETITION STANDBY (GPIO {gpio_pin})", (30, 180),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(img_disp, "PRESS BUTTON OR 'S' TO START!", (30, 230),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.imshow(window_name, img_disp)
+                key = cv2.waitKey(30) & 0xFF
+                if key in (ord('s'), ord('S'), 13, 32): # 's', ENTER, Space
+                    print("\n[DISPLAY] Start key pressed! Launching Competition Run...")
+                    return True
+                elif key in (ord('q'), ord('Q'), 27): # 'q' or ESC
+                    print("\n[USER CANCEL] Startup aborted.")
+                    sys.exit(0)
+        else:
+            time.sleep(0.05)
+
+
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Architecture: Precision Finish Line Stop Engine (Electronic Braking + Speed 175)")
+    print("   Architecture: Hardware Button Trigger + Precision Start Line Stop Engine")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
     use_vision_walls = "--vision-walls" in sys.argv or "--no-us" in sys.argv
+    skip_button = "--no-wait" in sys.argv or "--nowait" in sys.argv
+
+    gpio_pin = 17
+    if "--pin" in sys.argv:
+        idx = sys.argv.index("--pin")
+        if idx + 1 < len(sys.argv):
+            gpio_pin = int(sys.argv[idx + 1])
 
     forced_dir = "none"
     if "--dir" in sys.argv:
@@ -42,13 +105,13 @@ def main():
         print("[ERROR] Cannot proceed without ESP32 serial connection.")
         sys.exit(1)
 
-    # Force immediate STOP during startup
-    print("[SAFETY] Forcing robot STOP state during initialization...")
+    # Force immediate STOP on ESP32 to keep motors idle on boot
+    print("[SAFETY] ESP32 connected! Setting robot to idle STOP state...")
     serial_ctrl.send_command("STOP")
     time.sleep(0.5)
 
     show_monitor_display = "--no-display" not in sys.argv
-    window_name = "WRO Open Challenge - Hybrid Monitor Debug (Pi 5)"
+    window_name = "WRO Open Challenge - Competition Monitor Debug (Pi 5)"
 
     if show_monitor_display:
         try:
@@ -74,9 +137,16 @@ def main():
         time.sleep(0.04)
 
     # ------------------------------------------------------------------------
+    # COMPETITION STARTUP: Wait for physical button press on Pi 5 GPIO pin
+    # ------------------------------------------------------------------------
+    if not skip_button:
+        wait_for_button_press(gpio_pin=gpio_pin, show_display=show_monitor_display,
+                              window_name=window_name, camera=camera)
+
+    # ------------------------------------------------------------------------
     # Phase 1: Setup & Warmup Countdown (Record Initial Start Position Snapshot)
     # ------------------------------------------------------------------------
-    print("\n[READY] Sensor-Vision Engine Ready!")
+    print("\n[READY] Competition Run Started!")
     print("[PHASE 1] Recording Baseline Start Position Snapshot...")
 
     start_snapshot = {"f": 0, "f1": 0, "f2": 0, "l": 0, "r": 0, "b": 0}
@@ -232,12 +302,12 @@ def main():
                     print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
 
                     if t >= 12:
-                        # 12th (final) corner exit confirmed. Re-enable ultrasonics & approach start line at speed 175!
+                        # 12th (final) corner exit confirmed. Re-enable ultrasonics & approach start line!
                         is_returning_home = True
                         corner12_exit_time = currTime
                         serial_ctrl.send_command("AUTO_US_ON")
                         print("=" * 65)
-                        print(f"[PHASE 3] Final corner cleared! Approaching Start/Finish Line at slow speed {returnSpeed}...")
+                        print(f"[PHASE 3] Final corner cleared! Approaching Start/Finish Line at returnSpeed {returnSpeed}...")
                         print("[PHASE 3] Ultrasonics & Finish Line Scanner Active.")
                         print("=" * 65)
 
@@ -305,7 +375,7 @@ def main():
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and line_marker_detected:
                     reasons.append(f"START_FINISH_LINE_MARKER(O:{orangeArea},B:{blueArea})")
 
-                # (2) Primary Stop Trigger B: Baseline Sensor Snapshot Distance Match (tightened to 4cm)
+                # (2) Primary Stop Trigger B: Baseline Sensor Snapshot Distance Match (4cm)
                 init_b = start_snapshot.get("b", 0)
                 init_f = start_snapshot.get("f", 0)
                 b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 4.0)

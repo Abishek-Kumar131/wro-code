@@ -9,9 +9,8 @@
   Mechanical: P. Chandru (Mech) – Reg. No: 953623114009
 
   Hybrid Architecture:
-  - Ultrasonic Side-Wall Centering running on ESP32 at high rate.
-  - Pi 5 Vision triggers Turn Directions (TURN_LEFT / TURN_RIGHT / STOP).
-  - Pauses Side Ultrasonic Centering during timed corner arc turns.
+  - ESP32 Hardware Driver & Telemetry Engine.
+  - Idle state on boot waiting for Pi 5 USB Serial commands.
   - Periodic USB Serial Telemetry for Ultrasonic Sensors (US:F:..,L:..,R:..,B:..).
 */
 
@@ -37,12 +36,9 @@ bool rt_st_count = 0;
 bool left_right_arc_turn = 1;
 bool left_right_r_turn = 0;
 
-#define DPDT_Push_Button_Pin 34
-
 int f_us, f1_us, f2_us, b_us, l_us, r_us, fusa, far;
 
 bool LOGIC_LOCK = 1; // 1 True state.
-bool DPDT_STATE = 0; // 0 False state.
 
 // ########### USB Serial Command & Failsafe Definitions #################################//
 String serialCommandBuffer = "";
@@ -228,24 +224,9 @@ void loop() {
   else if (serialControlActive && useSideUltrasonic) {
     side_us_logic_fun();
   }
-  // 4. Standalone Autonomous DPDT Logic (when Pi 5 is not connected)
+  // 4. Standby / Idle Mode (Waiting for Pi 5 Serial Commands)
   else if (!serialControlActive) {
-    DPDT_STATE = digitalRead(DPDT_Push_Button_Pin);
-
-    if (DPDT_STATE == 1) { 
-      if (LOGIC_LOCK == 1) { 
-        side_us_logic_fun();
-      }
-
-      if (line_count >= line_chk_count) {
-        execute_stop();
-        bot_shutdown();
-        LOGIC_LOCK = 0;
-        line_count = 0; 
-      }
-    } else {
-      bot_shutdown();
-    }
+    bot_shutdown();
   }
 }
 

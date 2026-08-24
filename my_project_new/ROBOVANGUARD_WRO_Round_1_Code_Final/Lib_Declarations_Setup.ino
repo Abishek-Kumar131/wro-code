@@ -1,5 +1,5 @@
 /*
-  ROBOVANGUARD – WRO Future Engineers 2025
+  ROBOVANGUARD – WRO Future Engineers 2026
   World Robot Olympiad – Future Engineers Division
 
   Team ID: 1129 | Team Name: ROBOVANGUARD
@@ -11,10 +11,6 @@
   File: Lib_Declarations_Setup.ino (Round 1)
   Purpose: Library includes, pin/IO declarations, helper functions, and setup()
            used by the Round 1 control logic.
-
-  Notes:
-  - This header is documentation-only to clarify authorship and structure.
-  - No functional behavior is modified.
 */
 
 #include <Wire.h>
@@ -208,9 +204,6 @@ void US_Values(int &f, int &f1, int &f2, int &b, int &l, int &r)
 // ########### Setup ############################################################################################################ //
 void setup() {
   Serial.begin(115200);
-
-  //######### DPDT Setup #########//
-  pinMode(DPDT_Push_Button_Pin, INPUT);
 
   //######### RGB Led Setup #########//
   FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, NUM_LEDS);
