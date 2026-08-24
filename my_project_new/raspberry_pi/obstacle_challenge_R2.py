@@ -254,14 +254,21 @@ def main():
             b_us = us_data.get("b", 0)
 
             # -------------------------------------------------------------
-            # 0. EMERGENCY STRAIGHT REVERSE FOR CLOSE OBSTACLE BLOCKS (<= 7 cm)
+            # 0. EMERGENCY STRAIGHT REVERSE FOR CLOSE OBSTACLE BLOCKS (<= 18 cm or Touch)
             # -------------------------------------------------------------
-            too_close_front = (0 < f_us <= 7) or (0 < f1_us <= 7) or (0 < f2_us <= 7)
-            if too_close_front and not isTurning:
-                min_close = min([val for val in (f_us, f1_us, f2_us) if val > 0])
+            red_pillar_area = max_contour(contours_red, ROI3)[0]
+            green_pillar_area = max_contour(contours_green, ROI3)[0]
+            close_visual_pillar = (red_pillar_area > 1200 or green_pillar_area > 1200)
+
+            front_sensors = [v for v in (f_us, f1_us, f2_us) if v > 0]
+            has_close_us = any(0 < v <= 18 for v in (f_us, f1_us, f2_us))
+            bumper_touch = (f_us == 0 or f1_us == 0 or f2_us == 0) and close_visual_pillar
+
+            if (has_close_us or bumper_touch) and not isTurning:
+                min_close = min(front_sensors) if front_sensors else 0
                 print("=" * 65)
-                print(f"[EMERGENCY REVERSE] Obstacle block too close! ({min_close} cm <= 7 cm)")
-                print("[EMERGENCY REVERSE] Reversing straight until clearance >= 22 cm is re-established...")
+                print(f"[EMERGENCY REVERSE] Obstacle block detected close in front! (US: {min_close} cm | Vis: R={red_pillar_area}, G={green_pillar_area})")
+                print("[EMERGENCY REVERSE] Reversing straight until clearance >= 25 cm is re-established...")
                 print("=" * 65)
 
                 rev_start = time.time()
@@ -274,13 +281,13 @@ def main():
                     curr_f2 = us_check.get("f2", curr_f)
 
                     rev_elapsed = time.time() - rev_start
-                    front_cleared = (curr_f >= 22 or curr_f == 0) and \
-                                    (curr_f1 >= 22 or curr_f1 == 0) and \
-                                    (curr_f2 >= 22 or curr_f2 == 0)
+                    front_cleared = (curr_f >= 25 or curr_f == 0) and \
+                                    (curr_f1 >= 25 or curr_f1 == 0) and \
+                                    (curr_f2 >= 25 or curr_f2 == 0)
 
-                    if rev_elapsed >= 0.6 and front_cleared:
+                    if rev_elapsed >= 0.7 and front_cleared:
                         break
-                    if rev_elapsed >= 2.0: # Safety cap
+                    if rev_elapsed >= 2.5: # Safety cap
                         break
 
                 serial_ctrl.send_command("STOP")

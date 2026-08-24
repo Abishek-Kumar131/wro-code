@@ -11,7 +11,7 @@
   Hybrid Architecture:
   - ESP32 Hardware Driver & Telemetry Engine.
   - Idle state on boot waiting for Pi 5 USB Serial commands.
-  - Periodic USB Serial Telemetry for Ultrasonic Sensors (US:F:..,L:..,R:..,B:..).
+  - Periodic USB Serial Telemetry for All Ultrasonic Sensors (US:F:..,F1:..,F2:..,L:..,R:..,B:..).
 */
 
 int line_chk_count = 12;  // Lap check threshold (3 laps x 4 turns = 12)
@@ -186,6 +186,10 @@ void sendUltrasonicTelemetry() {
     lastTelemetryTime = millis();
     Serial.print("US:F:");
     Serial.print(f_us);
+    Serial.print(",F1:");
+    Serial.print(f1_us);
+    Serial.print(",F2:");
+    Serial.print(f2_us);
     Serial.print(",L:");
     Serial.print(l_us);
     Serial.print(",R:");
