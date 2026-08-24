@@ -18,7 +18,7 @@ def wait_for_button(gpio_pin=17):
     print("=" * 65)
     print("   ROBOVANGUARD WRO 2026 COMPETITION LAUNCHER")
     print(f"   Waiting for physical push button press on GPIO {gpio_pin}...")
-    print("   (Or press ENTER in terminal / keyboard 's' key)")
+    print("   (Or press ENTER in terminal)")
     print("=" * 65)
 
     button_obj = None
@@ -60,7 +60,9 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     r1_script = os.path.join(script_dir, "open_challenge_R1.py")
 
-    cmd = [sys.executable, r1_script, "--no-wait"]
+    # Forward any arguments like --no-display or --webcam
+    extra_args = [arg for arg in sys.argv[1:] if arg not in ("--pin", str(gpio_pin))]
+    cmd = [sys.executable, r1_script, "--no-wait"] + extra_args
     print(f"[EXEC] Running: {' '.join(cmd)}")
     
     try:
