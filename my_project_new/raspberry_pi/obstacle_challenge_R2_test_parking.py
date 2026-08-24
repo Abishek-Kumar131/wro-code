@@ -394,41 +394,56 @@ def main():
                 else:
                     endConst = 30
                     cKp, cKd, cy = 0.25, 0.25, 0.08
-
-                navMode = "SEARCHING"
-
-                # Case A: No Pillar Detected -> PD Wall-Centering
-                if cPillar.area == 0 and not parkingL and not parkingR:
-                    navMode = "VISION_WALLS"
-                    aDiff = rightArea - leftArea
-                    angle = int(straightConst - (aDiff * kp) - ((aDiff - prevDiff) * kd))
-                    prevDiff = aDiff
-
-                # Case B: Pillar Detected -> PD Pillar Avoidance + Y Proximity Scaling
-                elif not parkingR and not parkingL:
+                
+                # =========================================================================
+                # MODE A: PILLAR VISIBLE -> 100% PURE PILLAR AVOIDANCE (ZERO WALL INTERFERENCE)
+                # =========================================================================
+                if cPillar.area > 0 and not parkingR and not parkingL:
                     navMode = "RED_PILLAR" if cPillar.target == redTarget else "GREEN_PILLAR"
+                    
+                    # Calculate X error relative to target position
                     error = cPillar.target - cPillar.x
                     angle = int(straightConst - (error * cKp) - ((error - prevError) * cKd))
 
+                    # Adjust angle further based on vertical proximity (cy scaling)
                     if not tempParking:
                         y_offset = int(cy * (cPillar.y - ROI3[1]))
                         angle -= y_offset if error <= 0 else -y_offset
 
                     prevError = error
 
-                # Emergency Reversing Safety Check
+                # =========================================================================
+                # MODE B: PILLAR CLEARED / NO PILLAR -> USE SIDE ULTRASONICS (L & R) TO STEER AWAY FROM WALLS
+                # =========================================================================
+                elif not parkingL and not parkingR:
+                    navMode = "SIDE_US_WALLS"
+                    valid_left = (5 < l_us < 120)
+                    valid_right = (5 < r_us < 120)
+
+                    # 1. Both side sensors see valid walls -> Center between walls
+                    if valid_left and valid_right:
+                        diff = r_us - l_us # Positive when closer to left wall
+                        angle = int(straightConst + (diff * 2.0))
+                    # 2. Only Left sensor sees valid wall -> Maintain 25cm left wall distance
+                    elif valid_left:
+                        err = 25 - l_us # Positive when closer than 25cm to left wall
+                        angle = int(straightConst + (err * 2.0))
+                    # 3. Only Right sensor sees valid wall -> Maintain 25cm right wall distance
+                    elif valid_right:
+                        err = 25 - r_us # Positive when closer than 25cm to right wall
+                        angle = int(straightConst - (err * 2.0))
+                    # 4. Fallback to gentle vision wall centering
+                    else:
+                        aDiff = rightArea - leftArea
+                        angle = int(straightConst - (aDiff * 0.005))
+
+                # Emergency Reversing Safety Check (Blocked directly by pillar)
                 if ((cPillar.area > 6500 and cPillar.target == redTarget) or 
                     (cPillar.area > 8000 and cPillar.target == greenTarget)) and cPillar.y > 350 and not tempParking:
                     print("[SAFETY] Dangerously close to pillar! Executing emergency reverse...")
                     serial_ctrl.send_command("BACKWARD")
                     time.sleep(0.6)
                     serial_ctrl.send_command("FORWARD")
-
-                # 5 cm Side Ultrasonic Wall Safety Boundary (Allows robot to hug wall to avoid pillar, maintaining 5cm safety margin)
-                if 0 < l_us <= 5:
-                    angle = max(angle, 115) # Gentle steer right away from left wall
-                elif 0 < r_us <= 5:
-                    angle = min(angle, 85)  # Gentle steer left away from right wall
 
                 # Constrain angle between safe mechanical limits (60 to 140 deg)
                 angle = max(60, min(140, angle))
