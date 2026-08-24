@@ -193,6 +193,7 @@ def main():
     turnStartTime = 0
     lineLockoutUntil = 0   # 3.5s line detection lockout timer
     turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
+    reverseCooldownUntil = 0 # 1.2s emergency reverse cooldown timer
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
 
     # Dynamic Turn Exit Timings (Optimized for Narrow FOV Camera)
@@ -254,26 +255,38 @@ def main():
             b_us = us_data.get("b", 0)
 
             # -------------------------------------------------------------
-            # 0. EMERGENCY STRAIGHT REVERSE FOR CLOSE OBSTACLE BLOCKS (<= 18 cm or Touch)
+            # 0. EMERGENCY ANGLED REVERSE FOR CLOSE OBSTACLE BLOCKS (<= 12 cm or Touch)
             # -------------------------------------------------------------
             red_pillar_area = max_contour(contours_red, ROI3)[0]
             green_pillar_area = max_contour(contours_green, ROI3)[0]
             close_visual_pillar = (red_pillar_area > 1200 or green_pillar_area > 1200)
 
-            front_sensors = [v for v in (f_us, f1_us, f2_us) if v > 0]
-            has_close_us = any(0 < v <= 18 for v in (f_us, f1_us, f2_us))
+            front_sensors = [v for v in (f_us, f1_us, f2_us) if 0 < v <= 12]
+            has_close_us = len(front_sensors) > 0
             bumper_touch = (f_us == 0 or f1_us == 0 or f2_us == 0) and close_visual_pillar
 
-            if (has_close_us or bumper_touch) and not isTurning:
+            if (has_close_us or bumper_touch) and not isTurning and currTime >= reverseCooldownUntil:
                 min_close = min(front_sensors) if front_sensors else 0
+
+                # Determine dynamic reverse steering angle to angle nose toward open passage:
+                rev_steer = 100
+                if red_pillar_area > 800:
+                    rev_steer = 135 # Steer RIGHT while reversing to angle nose away from RED pillar on left
+                elif green_pillar_area > 800:
+                    rev_steer = 65  # Steer LEFT while reversing to angle nose away from GREEN pillar on right
+                elif leftArea > rightArea:
+                    rev_steer = 130 # Angle away from close left wall
+                elif rightArea > leftArea:
+                    rev_steer = 70  # Angle away from close right wall
+
                 print("=" * 65)
-                print(f"[EMERGENCY REVERSE] Obstacle block detected close in front! (US: {min_close} cm | Vis: R={red_pillar_area}, G={green_pillar_area})")
-                print("[EMERGENCY REVERSE] Reversing straight at speed -235 PWM until clearance >= 25 cm is re-established...")
+                print(f"[EMERGENCY REVERSE] Squeeze obstacle detected! (US: {min_close} cm | Rev Steer: {rev_steer}°)")
+                print(f"[EMERGENCY REVERSE] Reversing at angle {rev_steer}° to align nose into open passage...")
                 print("=" * 65)
 
                 rev_start = time.time()
                 while True:
-                    serial_ctrl.send_command("DRIVE:-235:100")
+                    serial_ctrl.send_command(f"DRIVE:-235:{rev_steer}")
                     time.sleep(0.05)
                     us_check = serial_ctrl.get_us_data()
                     curr_f = us_check.get("f", 0)
@@ -281,18 +294,19 @@ def main():
                     curr_f2 = us_check.get("f2", curr_f)
 
                     rev_elapsed = time.time() - rev_start
-                    front_cleared = (curr_f >= 25 or curr_f == 0) and \
-                                    (curr_f1 >= 25 or curr_f1 == 0) and \
-                                    (curr_f2 >= 25 or curr_f2 == 0)
+                    front_cleared = (curr_f >= 20 or curr_f == 0) and \
+                                    (curr_f1 >= 20 or curr_f1 == 0) and \
+                                    (curr_f2 >= 20 or curr_f2 == 0)
 
-                    if rev_elapsed >= 0.7 and front_cleared:
+                    if rev_elapsed >= 0.5 and front_cleared:
                         break
-                    if rev_elapsed >= 2.5: # Safety cap
+                    if rev_elapsed >= 1.5: # Safety cap
                         break
 
                 serial_ctrl.send_command("STOP")
-                time.sleep(0.1)
+                time.sleep(0.08)
                 serial_ctrl.send_command("FORWARD")
+                reverseCooldownUntil = time.time() + 1.2 # 1.2s cooldown so bot can pass cleanly through gap!
                 last_cmd_time = time.time()
                 last_drive_speed = turnSpeed
 
