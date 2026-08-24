@@ -179,10 +179,9 @@ def main():
     cy = 0.08
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
-    # Vertically separated: ROI3 (Pillars) Y <= 245 vs ROI4 (Floor Lines) Y >= 260!
     ROI1 = [0, 175, 330, 265]   # Left Wall ROI
     ROI2 = [330, 175, 640, 265]  # Right Wall ROI
-    ROI3 = [redTarget - 50, 110, greenTarget + 50, 245] # Signal Pillars ROI (Standing 3D Pillars above horizon!)
+    ROI3 = [0, 95, 640, 255]    # Signal Pillars / Block Detection ROI (Fit to full screen width 0..640 & +10% height 95..255)
     ROI4 = [200, 260, 440, 330]  # Ground Markers & Parking Lot ROI (Floor Lines)
 
     # Navigation flags & state counters

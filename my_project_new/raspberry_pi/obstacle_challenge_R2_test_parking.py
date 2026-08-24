@@ -174,8 +174,8 @@ def main():
     # Regions of Interest (ROI) [x1, y1, x2, y2]
     ROI1 = [0, 175, 330, 265]   # Left Wall ROI
     ROI2 = [330, 175, 640, 265]  # Right Wall ROI
-    ROI3 = [redTarget - 50, 110, greenTarget + 50, 245] # Signal Pillars ROI (Standing 3D Pillars above horizon!)
-    ROI4 = [150, 240, 490, 360]  # Floor Markers & Parking Lot ROI (Expanded for Red Parking Blocks)
+    ROI3 = [0, 95, 640, 255]    # Signal Pillars / Block Detection ROI (Fit to full screen width 0..640 & +10% height 95..255)
+    ROI4 = [200, 260, 440, 330]  # Ground Markers & Parking Lot ROI (Floor Lines)ded for Red Parking Blocks)
 
     # Navigation flags & state counters
     TARGET_TURNS = 4       # 1 LAP TEST TARGET (4 turns = 1 lap)
