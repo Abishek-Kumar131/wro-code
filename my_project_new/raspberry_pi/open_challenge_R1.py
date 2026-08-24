@@ -4,9 +4,9 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 WRO 2026 Competition Run Architecture:
-1. Competition Button Trigger: Pi 5 idles waiting for physical GPIO button press (default GPIO 17) or terminal ENTER key.
-2. ESP32 Handshake: ESP32 stays in idle STOP state until Pi 5 button is pressed.
-3. Baseline Position Snapshot: Recorded during warm-up countdown.
+1. Competition Button Trigger: Pi 5 idles waiting for physical GPIO button press (default GPIO 17).
+2. Non-Interactive Safeguard: Bypasses terminal stdin EOF checks when running as background systemd service.
+3. ESP32 Handshake: ESP32 stays in idle STOP state until Pi 5 button is pressed.
 4. Precision Finish Line Stop: Uses speed 175 + active electronic reverse brake pulse to halt 0cm offset at start line.
 """
 
@@ -21,39 +21,84 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
                            draw_offset_contours, display_variables)
 
 
-def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camera=None):
-    """Waits for a physical push button press on Pi 5 GPIO pin (or ENTER key / GUI key) before starting."""
+def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camera=None, active_high=False):
+    """Waits for a physical push button press on Pi 5 GPIO pin before starting autonomous run."""
     print("=" * 65)
     print(f"[COMPETITION STANDBY] Waiting for physical button press on GPIO {gpio_pin}...")
-    print("  -> Press physical button on GPIO 17")
-    print("  -> Or press ENTER in terminal / 's' in display window to start!")
     print("=" * 65)
+
+    is_interactive = sys.stdin.isatty()
+    if is_interactive:
+        print("  -> Running in interactive terminal (Press ENTER or Button to start)")
+    else:
+        print("  -> Running as background service (Waiting strictly for physical GPIO Button)")
 
     button_obj = None
     try:
         from gpiozero import Button
-        button_obj = Button(gpio_pin, pull_up=True)
-        print(f"[GPIO] Listening on GPIO {gpio_pin} (Pull-Up enabled via gpiozero).")
+        pull_up = not active_high
+        button_obj = Button(gpio_pin, pull_up=pull_up, bounce_time=0.05)
+        print(f"[GPIO] Listening on GPIO {gpio_pin} (pull_up={pull_up} via gpiozero).")
     except Exception:
         try:
             import RPi.GPIO as GPIO
             GPIO.setmode(GPIO.BCM)
-            GPIO.setup(gpio_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            print(f"[GPIO] Listening on GPIO {gpio_pin} (Pull-Up enabled via RPi.GPIO).")
+            pud = GPIO.PUD_DOWN if active_high else GPIO.PUD_UP
+            GPIO.setup(gpio_pin, GPIO.IN, pull_up_down=pud)
+            print(f"[GPIO] Listening on GPIO {gpio_pin} (via RPi.GPIO).")
         except Exception as e:
-            print(f"[GPIO INFO] Hardware GPIO library not loaded ({e}). Keyboard/terminal trigger active.")
+            print(f"[GPIO INFO] Hardware GPIO library not loaded ({e}).")
+
+    # Initial settling delay to clear power-on transients
+    time.sleep(0.5)
+
+    # Wait for button to be released if held down during boot
+    settle_start = time.time()
+    while True:
+        is_pressed = False
+        if button_obj is not None:
+            is_pressed = button_obj.is_pressed
+        elif 'GPIO' in sys.modules:
+            import RPi.GPIO as GPIO
+            pin_val = GPIO.input(gpio_pin)
+            is_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
+
+        if not is_pressed or (time.time() - settle_start > 3.0):
+            break
+        time.sleep(0.05)
+
+    print("[GPIO] STANDBY READY! Press physical push button now...")
 
     while True:
         # 1. Check physical hardware button press on Pi 5
-        if button_obj is not None and button_obj.is_pressed:
-            print("\n[BUTTON] PHYSICAL BUTTON PRESSED! Launching Competition Run...")
-            return True
+        is_pressed = False
+        if button_obj is not None:
+            is_pressed = button_obj.is_pressed
+        elif 'GPIO' in sys.modules:
+            import RPi.GPIO as GPIO
+            pin_val = GPIO.input(gpio_pin)
+            is_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
 
-        # 2. Check terminal stdin (ENTER key) non-blockingly
-        if sys.stdin in select.select([sys.stdin], [], [], 0.02)[0]:
-            line = sys.stdin.readline()
-            print("\n[TERMINAL] Start command received via ENTER key! Launching...")
-            return True
+        if is_pressed:
+            time.sleep(0.08) # 80ms debounce verification
+            confirm_pressed = False
+            if button_obj is not None:
+                confirm_pressed = button_obj.is_pressed
+            elif 'GPIO' in sys.modules:
+                import RPi.GPIO as GPIO
+                pin_val = GPIO.input(gpio_pin)
+                confirm_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
+
+            if confirm_pressed:
+                print("\n[BUTTON] PHYSICAL BUTTON PRESSED! Launching Competition Run...")
+                return True
+
+        # 2. Check terminal stdin ONLY if running interactively in terminal (NOT in systemd background)
+        if is_interactive:
+            if sys.stdin in select.select([sys.stdin], [], [], 0.02)[0]:
+                line = sys.stdin.readline()
+                print("\n[TERMINAL] Start command received via ENTER key! Launching...")
+                return True
 
         # 3. Check OpenCV monitor window keypress ('s' or spacebar to start)
         if show_display and window_name and camera:
@@ -85,6 +130,7 @@ def main():
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
     use_vision_walls = "--vision-walls" in sys.argv or "--no-us" in sys.argv
     skip_button = "--no-wait" in sys.argv or "--nowait" in sys.argv
+    active_high = "--active-high" in sys.argv
 
     gpio_pin = 17
     if "--pin" in sys.argv:
@@ -141,7 +187,7 @@ def main():
     # ------------------------------------------------------------------------
     if not skip_button:
         wait_for_button_press(gpio_pin=gpio_pin, show_display=show_monitor_display,
-                              window_name=window_name, camera=camera)
+                              window_name=window_name, camera=camera, active_high=active_high)
 
     # ------------------------------------------------------------------------
     # Phase 1: Setup & Warmup Countdown (Record Initial Start Position Snapshot)
