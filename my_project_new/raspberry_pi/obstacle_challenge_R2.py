@@ -165,9 +165,9 @@ def main():
     sharpRight = 60    # Sharp right steering lock
     sharpLeft = 140    # Sharp left steering lock
 
-    # Speed Parameters (Anti-Drift Speed Control)
-    normalSpeed = 245  # Full straightaway speed (96% PWM)
-    turnSpeed = 195    # Reduced cornering speed when steering deflection > 30° to prevent drifting!
+    # Speed Parameters (All speeds >= 235 PWM for powerful motor response)
+    normalSpeed = 245  # Full straightaway speed (245 PWM)
+    turnSpeed = 235    # High cornering & pillar avoidance speed (235 PWM)
 
     # PD Wall-Centering gains
     kp = 0.015
@@ -268,12 +268,12 @@ def main():
                 min_close = min(front_sensors) if front_sensors else 0
                 print("=" * 65)
                 print(f"[EMERGENCY REVERSE] Obstacle block detected close in front! (US: {min_close} cm | Vis: R={red_pillar_area}, G={green_pillar_area})")
-                print("[EMERGENCY REVERSE] Reversing straight until clearance >= 25 cm is re-established...")
+                print("[EMERGENCY REVERSE] Reversing straight at speed -235 PWM until clearance >= 25 cm is re-established...")
                 print("=" * 65)
 
                 rev_start = time.time()
                 while True:
-                    serial_ctrl.send_command("DRIVE:-180:100")
+                    serial_ctrl.send_command("DRIVE:-235:100")
                     time.sleep(0.05)
                     us_check = serial_ctrl.get_us_data()
                     curr_f = us_check.get("f", 0)
@@ -294,7 +294,7 @@ def main():
                 time.sleep(0.1)
                 serial_ctrl.send_command("FORWARD")
                 last_cmd_time = time.time()
-                last_drive_speed = 195
+                last_drive_speed = turnSpeed
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
