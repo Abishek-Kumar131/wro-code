@@ -174,11 +174,11 @@ class WROSerialController:
 
         if cmd_clean in self.VALID_COMMANDS:
             is_valid = True
-        elif cmd_clean.startswith("STEER:") and len(parts) == 2 and parts[1].isdigit():
+        elif cmd_clean.startswith("STEER:") and len(parts) == 2 and parts[1].lstrip('-').isdigit():
             is_valid = True
-        elif cmd_clean.startswith("DRIVE:") and len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        elif cmd_clean.startswith("DRIVE:") and len(parts) == 3 and parts[1].lstrip('-').isdigit() and parts[2].lstrip('-').isdigit():
             is_valid = True
-        elif cmd_clean.startswith("SET_SPEED:") and len(parts) == 2 and parts[1].isdigit():
+        elif cmd_clean.startswith("SET_SPEED:") and len(parts) == 2 and parts[1].lstrip('-').isdigit():
             is_valid = True
         elif cmd_clean.startswith("SET_TURN_DELAY:") and len(parts) == 2 and parts[1].isdigit():
             is_valid = True
