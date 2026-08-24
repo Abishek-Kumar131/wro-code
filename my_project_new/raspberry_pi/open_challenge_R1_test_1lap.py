@@ -117,8 +117,8 @@ def main():
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
 
     normalSpeed = 245      # Full straightaway speed (96% PWM)
-    turnSpeed = 230        # Global turn & cornering speed (230)
-    returnSpeed = 230      # Slow controlled approach speed for pin-point finish stopping (230 PWM)
+    turnSpeed = 195        # Reduced turn & cornering speed to prevent drifting when steering > 30 deg or max 40 deg
+    returnSpeed = 230      # Controlled approach speed for pin-point finish stopping (230 PWM)
 
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
     maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
@@ -274,57 +274,52 @@ def main():
             if is_returning_home and not home_stop_initiated:
                 elapsed_since_corner = currTime - corner_exit_time
 
-                # Gentle, stable straightaway steering towards finish line
                 aDiff = rightArea - leftArea
-                gentle_steer = int(100 - (aDiff * 0.005))
-                gentle_steer = max(85, min(115, gentle_steer))
+                gentle_steer = int(100 - (aDiff * 0.01))
+                gentle_steer = max(80, min(120, gentle_steer))
 
                 reasons = []
 
-                # (a) Front wall clearance limit (45 cm)
-                if f_us > 0 and f_us <= FRONT_WALL_HARD_STOP_CM:
-                    reasons.append(f"FRONT_WALL_PROXIMITY({f_us}cm)")
-
-                # (b) Calibrated drive time (1.6s) to center vehicle in start box
-                if elapsed_since_corner >= max(TARGET_HOME_DRIVE_TIME, MIN_CLEAR_OF_CORNER_TIME):
-                    reasons.append("TARGET_DRIVE_TIME")
-
-                # (c) Start line floor marker detection (if past corner exit clearance)
                 line_marker_detected = (
                     (turnDir == "right" and orangeArea > 150) or
                     (turnDir == "left" and blueArea > 150) or
                     (turnDir == "none" and (orangeArea > 150 or blueArea > 150))
                 )
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and line_marker_detected:
-                    reasons.append(f"LINE_MARKER({orangeArea}/{blueArea})")
+                    reasons.append(f"START_FINISH_LINE_MARKER(O:{orangeArea},B:{blueArea})")
 
-                # (d) Absolute timeout cap (3.5s)
+                init_b = start_snapshot.get("b", 0)
+                init_f = start_snapshot.get("f", 0)
+                b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 4.0)
+                f_match = (init_f > 0 and f_us > 0 and abs(f_us - init_f) <= 4.0)
+                if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and (b_match or f_match):
+                    reasons.append(f"BASELINE_SENSOR_MATCH(F:{f_us}/{init_f},B:{b_us}/{init_b})")
+
+                if f_us > 0 and f_us <= FRONT_WALL_HARD_STOP_CM:
+                    reasons.append(f"FRONT_WALL_PROXIMITY({f_us}cm)")
+
                 if elapsed_since_corner >= HOME_ABSOLUTE_TIMEOUT:
-                    reasons.append("SAFETY_TIMEOUT")
+                    reasons.append("SAFETY_TIMEOUT_CAP")
 
-                should_stop_condition = elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and len(reasons) > 0
+                should_stop_now = len(reasons) > 0
 
-                if should_stop_condition:
-                    if home_stop_confirm_start == 0:
-                        home_stop_confirm_start = currTime
-                        print(f"[PHASE 3] Stop condition met ({', '.join(reasons)}). Debouncing hold...")
-                    elif (currTime - home_stop_confirm_start) >= STOP_CONFIRM_HOLD:
-                        home_stop_initiated = True
-                        print("=" * 65)
-                        print(f"[FINISH STOP] Halting inside starting section! Reasons: {reasons}")
-                        print(f"[FINISH METRICS] Elapsed since Turn 4 exit: {round(elapsed_since_corner, 2)}s")
-                        print(f"[SENSORS] F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Baseline: {start_snapshot}")
-                        print("=" * 65)
+                if should_stop_now:
+                    home_stop_initiated = True
+                    print("=" * 65)
+                    print(f"[FINISH PRECISION STOP] Executing Active Electronic Reverse Brake Pulse!")
+                    print(f"[FINISH METRICS] Reasons: {reasons}")
+                    print(f"[FINISH METRICS] Elapsed since Turn 4 exit: {round(elapsed_since_corner, 2)}s")
+                    print(f"[SENSORS] Current F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Baseline: {start_snapshot}")
+                    print("=" * 65)
 
-                        serial_ctrl.send_command("STOP")
-                        serial_ctrl.send_command("DRIVE:-120:100")
-                        time.sleep(0.04)
-                        serial_ctrl.send_command("STOP")
-                        last_drive_speed = 0
-                        time.sleep(0.5)
-                        break
+                    serial_ctrl.send_command("STOP")
+                    serial_ctrl.send_command("DRIVE:-180:100")
+                    time.sleep(0.08)
+                    serial_ctrl.send_command("STOP")
+                    last_drive_speed = 0
+                    time.sleep(0.5)
+                    break
                 else:
-                    home_stop_confirm_start = 0
                     if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != returnSpeed:
                         serial_ctrl.send_command(f"DRIVE:{returnSpeed}:{gentle_steer}")
                         last_cmd_time = currTime
