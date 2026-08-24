@@ -286,25 +286,25 @@ def main():
             # -------------------------------------------------------------
             if t < 12 and not isTurning and not is_returning_home and currTime >= lineLockoutUntil:
                 if turnDir == "none":
-                    if orangeArea > 150 and orangeArea > blueArea:
+                    if orangeArea > 100 and orangeArea > blueArea:
                         turnDir = "right"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
                         print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT!")
-                    elif blueArea > 150 and blueArea > orangeArea:
+                    elif blueArea > 100 and blueArea > orangeArea:
                         turnDir = "left"
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
                         print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT!")
                 
                 elif turnDir == "right":
-                    if orangeArea > 150:
+                    if orangeArea > 100:
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
                         print(f"[LOCKED MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT (3.5s Line Lockout)")
                 
                 elif turnDir == "left":
-                    if blueArea > 150:
+                    if blueArea > 100:
                         lDetected = True
                         lineLockoutUntil = currTime + lockoutDuration
                         print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
