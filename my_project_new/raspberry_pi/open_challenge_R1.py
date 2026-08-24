@@ -4,10 +4,11 @@ ROBOVANGUARD - WRO Future Engineers 2026
 Raspberry Pi 5 Open Challenge Autonomous Navigation (Round 1)
 
 WRO 2026 Competition Run Architecture:
-1. Competition Button Trigger: Pi 5 idles waiting for physical GPIO button press (default GPIO 17).
-2. Non-Interactive Safeguard: Bypasses terminal stdin EOF checks when running as background systemd service.
-3. ESP32 Handshake: ESP32 stays in idle STOP state until Pi 5 button is pressed.
-4. Precision Finish Line Stop: Uses speed 175 + active electronic reverse brake pulse to halt 0cm offset at start line.
+1. Corner Steering Calibration: 60° = LEFT TURN, 140° = RIGHT TURN (matching ESP32 firmware).
+2. Competition Button Trigger: Pi 5 idles waiting for physical GPIO button press (default GPIO 17).
+3. Non-Interactive Safeguard: Bypasses terminal stdin EOF checks when running as background systemd service.
+4. ESP32 Handshake: ESP32 stays in idle STOP state until Pi 5 button is pressed.
+5. Precision Finish Line Stop: Uses speed 175 + active electronic reverse brake pulse to halt 0cm offset at start line.
 """
 
 import sys
@@ -49,10 +50,8 @@ def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camer
         except Exception as e:
             print(f"[GPIO INFO] Hardware GPIO library not loaded ({e}).")
 
-    # Initial settling delay to clear power-on transients
     time.sleep(0.5)
 
-    # Wait for button to be released if held down during boot
     settle_start = time.time()
     while True:
         is_pressed = False
@@ -70,7 +69,6 @@ def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camer
     print("[GPIO] STANDBY READY! Press physical push button now...")
 
     while True:
-        # 1. Check physical hardware button press on Pi 5
         is_pressed = False
         if button_obj is not None:
             is_pressed = button_obj.is_pressed
@@ -80,7 +78,7 @@ def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camer
             is_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
 
         if is_pressed:
-            time.sleep(0.08) # 80ms debounce verification
+            time.sleep(0.08)
             confirm_pressed = False
             if button_obj is not None:
                 confirm_pressed = button_obj.is_pressed
@@ -93,14 +91,12 @@ def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camer
                 print("\n[BUTTON] PHYSICAL BUTTON PRESSED! Launching Competition Run...")
                 return True
 
-        # 2. Check terminal stdin ONLY if running interactively in terminal (NOT in systemd background)
         if is_interactive:
             if sys.stdin in select.select([sys.stdin], [], [], 0.02)[0]:
                 line = sys.stdin.readline()
                 print("\n[TERMINAL] Start command received via ENTER key! Launching...")
                 return True
 
-        # 3. Check OpenCV monitor window keypress ('s' or spacebar to start)
         if show_display and window_name and camera:
             img = camera.capture_array()
             if img is not None:
@@ -111,10 +107,10 @@ def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camer
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 cv2.imshow(window_name, img_disp)
                 key = cv2.waitKey(30) & 0xFF
-                if key in (ord('s'), ord('S'), 13, 32): # 's', ENTER, Space
+                if key in (ord('s'), ord('S'), 13, 32):
                     print("\n[DISPLAY] Start key pressed! Launching Competition Run...")
                     return True
-                elif key in (ord('q'), ord('Q'), 27): # 'q' or ESC
+                elif key in (ord('q'), ord('Q'), 27):
                     print("\n[USER CANCEL] Startup aborted.")
                     sys.exit(0)
         else:
@@ -124,7 +120,7 @@ def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camer
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge Node (Pi 5)")
-    print("   Architecture: Hardware Button Trigger + Precision Start Line Stop Engine")
+    print("   Architecture: Corrected Steering Geometry (60=LEFT, 140=RIGHT)")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -151,7 +147,6 @@ def main():
         print("[ERROR] Cannot proceed without ESP32 serial connection.")
         sys.exit(1)
 
-    # Force immediate STOP on ESP32 to keep motors idle on boot
     print("[SAFETY] ESP32 connected! Setting robot to idle STOP state...")
     serial_ctrl.send_command("STOP")
     time.sleep(0.5)
@@ -172,7 +167,6 @@ def main():
     camera = CameraManager(force_webcam=force_webcam, device_index=0)
     camera.start()
 
-    # Warmup camera frames
     print("[INFO] Capturing camera warmup frames...")
     for _ in range(15):
         warmup_frame = camera.capture_array()
@@ -190,7 +184,7 @@ def main():
                               window_name=window_name, camera=camera, active_high=active_high)
 
     # ------------------------------------------------------------------------
-    # Phase 1: Setup & Warmup Countdown (Record Initial Start Position Snapshot)
+    # Phase 1: Setup & Warmup Countdown
     # ------------------------------------------------------------------------
     print("\n[READY] Competition Run Started!")
     print("[PHASE 1] Recording Baseline Start Position Snapshot...")
@@ -221,7 +215,7 @@ def main():
     print(f"[START SNAPSHOT] Home Baseline Position Recorded: {start_snapshot}")
 
     # ------------------------------------------------------------------------
-    # Phase 2: Start Active Driving (Ultrasonics deactivated during laps)
+    # Phase 2: Start Active Driving
     # ------------------------------------------------------------------------
     print("[START] Driving FORWARD (Phase 2: Ultrasonics off for zero-lag vision)!")
     serial_ctrl.send_command("AUTO_US_OFF")
@@ -249,9 +243,6 @@ def main():
     wallReacquireArea = 600 # Area threshold to confirm single wall in narrow FOV view
     turnThresh = 200       # Area threshold below which wall end is detected
 
-    # ------------------------------------------------------------------------
-    # Phase 3 Parameters (Precision Finish Section Stopping Engine)
-    # ------------------------------------------------------------------------
     is_returning_home = False          # True once 12th (final) corner exit is confirmed
     corner12_exit_time = 0             # Timestamp when 12th turn exit was confirmed
     home_stop_initiated = False        # True once final stop sequence is committed
@@ -260,7 +251,6 @@ def main():
     FRONT_WALL_HARD_STOP_CM = 25.0     # Hard safety ceiling: stop if front wall <= 25cm
     HOME_ABSOLUTE_TIMEOUT = 4.0        # Absolute maximum timeout cap since turn-12 exit
 
-    # Serial rate-limiting variables
     last_steer_angle = None
     last_drive_speed = None
     last_cmd_time = 0
@@ -285,8 +275,6 @@ def main():
             orangeArea = max_contour(cListOrange, ROI3)[0]
             blueArea = max_contour(cListBlue, ROI3)[0]
 
-            # Ultrasonics: OFF during laps 1-3 for zero lag, ON immediately once
-            # we've confirmed we exited the 12th (final) corner.
             us_data = serial_ctrl.get_us_data() if is_returning_home else {}
             f_us = us_data.get("f", 0)
             l_us = us_data.get("l", 0)
@@ -295,7 +283,6 @@ def main():
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
-            #    (Guarded with t < 12 so it never fires past 12 turns)
             # -------------------------------------------------------------
             if t < 12 and not isTurning and not is_returning_home and currTime >= lineLockoutUntil:
                 if turnDir == "none":
@@ -323,10 +310,11 @@ def main():
                         print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (turnSpeed = 230)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (CORRECTED: 60=LEFT, 140=RIGHT)
             # -------------------------------------------------------------
             if isTurning and not is_returning_home:
-                targetTurnAngle = 140 if turnDir == "left" else 60
+                # FIX: 60 deg is LEFT turn, 140 deg is RIGHT turn (matching ESP32 hardware steering!)
+                targetTurnAngle = 60 if turnDir == "left" else 140
                 
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
@@ -348,7 +336,6 @@ def main():
                     print(f"[NAV EVENT] Turn {t}/12 ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
 
                     if t >= 12:
-                        # 12th (final) corner exit confirmed. Re-enable ultrasonics & approach start line!
                         is_returning_home = True
                         corner12_exit_time = currTime
                         serial_ctrl.send_command("AUTO_US_ON")
@@ -357,16 +344,16 @@ def main():
                         print("[PHASE 3] Ultrasonics & Finish Line Scanner Active.")
                         print("=" * 65)
 
-            # BUGFIX: Guarded with `t < 12` so a phantom 13th turn can NEVER trigger!
             elif (t < 12) and currTime >= turnCooldownUntil and not is_returning_home:
                 wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
                                    (turnDir == "left" and leftArea <= turnThresh) or \
                                    (turnDir == "right" and rightArea <= turnThresh)
 
                 if (lDetected or forced_dir != "none") and wallDropDetected:
-                    targetTurnAngle = 140 if turnDir == "left" else 60
+                    # FIX: 60 deg is LEFT turn, 140 deg is RIGHT turn!
+                    targetTurnAngle = 60 if turnDir == "left" else 140
                     t += 1
-                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/12) at turnSpeed={turnSpeed}...")
+                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/12) angle={targetTurnAngle}...")
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
                     last_drive_speed = turnSpeed
@@ -405,14 +392,12 @@ def main():
             if is_returning_home and not home_stop_initiated:
                 elapsed_since_corner = currTime - corner12_exit_time
 
-                # Gentle wall centering steering on the home stretch
                 aDiff = rightArea - leftArea
                 gentle_steer = int(100 - (aDiff * 0.01))
                 gentle_steer = max(80, min(120, gentle_steer))
 
                 reasons = []
 
-                # (1) Primary Stop Trigger A: Start/Finish Floor Line Marker Detection in ROI3!
                 line_marker_detected = (
                     (turnDir == "right" and orangeArea > 150) or
                     (turnDir == "left" and blueArea > 150) or
@@ -421,7 +406,6 @@ def main():
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and line_marker_detected:
                     reasons.append(f"START_FINISH_LINE_MARKER(O:{orangeArea},B:{blueArea})")
 
-                # (2) Primary Stop Trigger B: Baseline Sensor Snapshot Distance Match (4cm)
                 init_b = start_snapshot.get("b", 0)
                 init_f = start_snapshot.get("f", 0)
                 b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 4.0)
@@ -429,11 +413,9 @@ def main():
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and (b_match or f_match):
                     reasons.append(f"BASELINE_SENSOR_MATCH(F:{f_us}/{init_f},B:{b_us}/{init_b})")
 
-                # (3) Safety Ceiling A: Front wall clearance <= 25cm (prevents hitting far wall)
                 if f_us > 0 and f_us <= FRONT_WALL_HARD_STOP_CM:
                     reasons.append(f"FRONT_WALL_PROXIMITY({f_us}cm)")
 
-                # (4) Safety Ceiling B: Timeout cap (4.0 seconds max)
                 if elapsed_since_corner >= HOME_ABSOLUTE_TIMEOUT:
                     reasons.append("SAFETY_TIMEOUT_CAP")
 
@@ -448,9 +430,8 @@ def main():
                     print(f"[SENSORS] Current F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Baseline: {start_snapshot}")
                     print("=" * 65)
 
-                    # Active Electronic Braking Sequence:
                     serial_ctrl.send_command("STOP")
-                    serial_ctrl.send_command("DRIVE:-180:100")  # Short 0.08s reverse pulse to cancel momentum
+                    serial_ctrl.send_command("DRIVE:-180:100")
                     time.sleep(0.08)
                     serial_ctrl.send_command("STOP")
                     last_drive_speed = 0
@@ -469,7 +450,6 @@ def main():
                 time.sleep(0.5)
                 break
 
-            # Draw ROIs & Offset Contours (matching my_old_contour_colorvals_crt.py)
             img_disp = img.copy()
             draw_roi(img_disp, ROI1, (0, 255, 255), 2)
             draw_roi(img_disp, ROI2, (0, 255, 255), 2)
@@ -500,7 +480,6 @@ def main():
             cv2.putText(img_disp, wall_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
             cv2.putText(img_disp, us_text, (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-            # Display directly on monitor screen & keyboard controls
             if show_monitor_display:
                 cv2.imshow(window_name, img_disp)
                 key = cv2.waitKey(1) & 0xFF
@@ -532,7 +511,7 @@ def main():
                 "Home Baseline": start_snapshot
             })
 
-            time.sleep(0.02)  # 50 Hz vision loop
+            time.sleep(0.02)
 
     except KeyboardInterrupt:
         print("\n[SAFETY] Keyboard Interrupt. Halting bot...")

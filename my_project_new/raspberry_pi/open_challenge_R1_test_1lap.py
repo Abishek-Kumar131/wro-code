@@ -7,10 +7,12 @@ Raspberry Pi 5 Open Challenge Autonomous Navigation (1-LAP TEST SCRIPT)
 - Performs Return-to-Home after completing exactly 1 LAP (4 turns) instead of 3 laps (12 turns).
 - Perfect for quick bench and track testing!
 - Uses Electronic Reverse Braking + Slow Approach Speed 175 for pin-point 0cm offset stopping accuracy.
+- Corrected Steering Angles: 60° = LEFT TURN, 140° = RIGHT TURN.
 """
 
 import sys
 import time
+import select
 import cv2
 import numpy as np
 from wro_serial import WROSerialController
@@ -22,7 +24,7 @@ from wro_functions import (CameraManager, find_black_wall_contours, find_contour
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 1 Open Challenge (1-LAP TEST NODE)")
-    print("   Architecture: Precision Finish Line Stop Engine (Electronic Braking + Speed 175)")
+    print("   Architecture: 1-Lap (4 Turns) Corrected Steering (60=LEFT, 140=RIGHT)")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -35,13 +37,11 @@ def main():
             forced_dir = sys.argv[idx + 1].lower()
             print(f"[CONFIG] Forcing fixed track direction: {forced_dir.upper()}")
 
-    # 1. Initialize USB Serial connection to ESP32
     serial_ctrl = WROSerialController()
     if not serial_ctrl.connect():
         print("[ERROR] Cannot proceed without ESP32 serial connection.")
         sys.exit(1)
 
-    # Force immediate STOP during startup
     print("[SAFETY] Forcing robot STOP state during initialization...")
     serial_ctrl.send_command("STOP")
     time.sleep(0.5)
@@ -58,11 +58,9 @@ def main():
             print(f"[WARNING] Could not open GUI display window: {e}")
             show_monitor_display = False
 
-    # 2. Initialize Camera (Picamera2 or USB Webcam)
     camera = CameraManager(force_webcam=force_webcam, device_index=0)
     camera.start()
 
-    # Warmup camera frames
     print("[INFO] Capturing camera warmup frames...")
     for _ in range(15):
         warmup_frame = camera.capture_array()
@@ -72,9 +70,6 @@ def main():
                 cv2.waitKey(1)
         time.sleep(0.04)
 
-    # ------------------------------------------------------------------------
-    # Phase 1: Setup & Warmup Countdown (Record Initial Start Position Snapshot)
-    # ------------------------------------------------------------------------
     print("\n[READY] 1-Lap Test Engine Ready!")
     print("[PHASE 1] Recording Baseline Start Position...")
 
@@ -103,9 +98,6 @@ def main():
 
     print(f"[START SNAPSHOT] Baseline Position Snapshot Recorded: {start_snapshot}")
 
-    # ------------------------------------------------------------------------
-    # Phase 2: Start Active Driving (1-LAP TEST MODE: Target = 4 Turns)
-    # ------------------------------------------------------------------------
     print("[START] Driving FORWARD (1-Lap Test Mode: Target = 4 Turns / 1 Lap)!")
     serial_ctrl.send_command("AUTO_US_OFF")
     serial_ctrl.send_command("FORWARD")
@@ -133,9 +125,6 @@ def main():
     wallReacquireArea = 600 # Area threshold to confirm single wall in narrow FOV view
     turnThresh = 200       # Area threshold below which wall end is detected
 
-    # ------------------------------------------------------------------------
-    # Phase 3 Parameters (Return to Home after 1 Lap)
-    # ------------------------------------------------------------------------
     is_returning_home = False          # True once final corner exit is confirmed
     corner_exit_time = 0               # Timestamp when 4th turn exit was confirmed
     home_stop_initiated = False        # True once final stop sequence is committed
@@ -144,7 +133,6 @@ def main():
     FRONT_WALL_HARD_STOP_CM = 25.0     # Hard safety ceiling: stop if front wall <= 25cm
     HOME_ABSOLUTE_TIMEOUT = 4.0        # Absolute maximum timeout cap since turn exit
 
-    # Serial rate-limiting variables
     last_steer_angle = None
     last_drive_speed = None
     last_cmd_time = 0
@@ -169,7 +157,6 @@ def main():
             orangeArea = max_contour(cListOrange, ROI3)[0]
             blueArea = max_contour(cListBlue, ROI3)[0]
 
-            # Ultrasonics: OFF during lap for zero lag, ON immediately once 4th corner exit confirmed
             us_data = serial_ctrl.get_us_data() if is_returning_home else {}
             f_us = us_data.get("f", 0)
             l_us = us_data.get("l", 0)
@@ -178,7 +165,6 @@ def main():
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
-            #    (Guarded with t < TARGET_TURNS so it never fires past 4 turns)
             # -------------------------------------------------------------
             if t < TARGET_TURNS and not isTurning and not is_returning_home and currTime >= lineLockoutUntil:
                 if turnDir == "none":
@@ -206,10 +192,11 @@ def main():
                         print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
 
             # -------------------------------------------------------------
-            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (turnSpeed = 230)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (CORRECTED: 60=LEFT, 140=RIGHT)
             # -------------------------------------------------------------
             if isTurning and not is_returning_home:
-                targetTurnAngle = 140 if turnDir == "left" else 60
+                # FIX: 60 deg is LEFT turn, 140 deg is RIGHT turn!
+                targetTurnAngle = 60 if turnDir == "left" else 140
                 
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
@@ -231,25 +218,24 @@ def main():
                     print(f"[NAV EVENT] Turn {t}/{TARGET_TURNS} ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
 
                     if t >= TARGET_TURNS:
-                        # 4th corner exit confirmed (1-Lap Complete). Re-enable ultrasonics & approach start line at speed 175!
                         is_returning_home = True
                         corner_exit_time = currTime
                         serial_ctrl.send_command("AUTO_US_ON")
                         print("=" * 65)
-                        print(f"[PHASE 3] 1 LAP COMPLETE ({t}/{TARGET_TURNS} Turns)! Approaching Start/Finish Line at slow speed {returnSpeed}...")
+                        print(f"[PHASE 3] 1 LAP COMPLETE ({t}/{TARGET_TURNS} Turns)! Approaching Start/Finish Line at returnSpeed {returnSpeed}...")
                         print("[PHASE 3] Ultrasonics & Finish Line Scanner Active.")
                         print("=" * 65)
 
-            # BUGFIX: Guarded with `t < TARGET_TURNS` so a 5th phantom turn can NEVER trigger!
             elif (t < TARGET_TURNS) and currTime >= turnCooldownUntil and not is_returning_home:
                 wallDropDetected = (leftArea <= turnThresh and rightArea <= turnThresh) or \
                                    (turnDir == "left" and leftArea <= turnThresh) or \
                                    (turnDir == "right" and rightArea <= turnThresh)
 
                 if (lDetected or forced_dir != "none") and wallDropDetected:
-                    targetTurnAngle = 140 if turnDir == "left" else 60
+                    # FIX: 60 deg is LEFT turn, 140 deg is RIGHT turn!
+                    targetTurnAngle = 60 if turnDir == "left" else 140
                     t += 1
-                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/{TARGET_TURNS}) at turnSpeed={turnSpeed}...")
+                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/{TARGET_TURNS}) angle={targetTurnAngle}...")
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
                     last_drive_speed = turnSpeed
@@ -288,14 +274,12 @@ def main():
             if is_returning_home and not home_stop_initiated:
                 elapsed_since_corner = currTime - corner_exit_time
 
-                # Gentle wall centering steering on the home stretch
                 aDiff = rightArea - leftArea
                 gentle_steer = int(100 - (aDiff * 0.01))
                 gentle_steer = max(80, min(120, gentle_steer))
 
                 reasons = []
 
-                # (1) Primary Stop Trigger A: Start/Finish Floor Line Marker Detection in ROI3!
                 line_marker_detected = (
                     (turnDir == "right" and orangeArea > 150) or
                     (turnDir == "left" and blueArea > 150) or
@@ -304,7 +288,6 @@ def main():
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and line_marker_detected:
                     reasons.append(f"START_FINISH_LINE_MARKER(O:{orangeArea},B:{blueArea})")
 
-                # (2) Primary Stop Trigger B: Baseline Sensor Snapshot Distance Match (tightened to 4cm)
                 init_b = start_snapshot.get("b", 0)
                 init_f = start_snapshot.get("f", 0)
                 b_match = (init_b > 0 and b_us > 0 and abs(b_us - init_b) <= 4.0)
@@ -312,11 +295,9 @@ def main():
                 if elapsed_since_corner >= MIN_CLEAR_OF_CORNER_TIME and (b_match or f_match):
                     reasons.append(f"BASELINE_SENSOR_MATCH(F:{f_us}/{init_f},B:{b_us}/{init_b})")
 
-                # (3) Safety Ceiling A: Front wall clearance <= 25cm (prevents hitting far wall)
                 if f_us > 0 and f_us <= FRONT_WALL_HARD_STOP_CM:
                     reasons.append(f"FRONT_WALL_PROXIMITY({f_us}cm)")
 
-                # (4) Safety Ceiling B: Timeout cap (4.0 seconds max)
                 if elapsed_since_corner >= HOME_ABSOLUTE_TIMEOUT:
                     reasons.append("SAFETY_TIMEOUT_CAP")
 
@@ -331,9 +312,8 @@ def main():
                     print(f"[SENSORS] Current F:{f_us} L:{l_us} R:{r_us} B:{b_us} | Baseline: {start_snapshot}")
                     print("=" * 65)
 
-                    # Active Electronic Braking Sequence:
                     serial_ctrl.send_command("STOP")
-                    serial_ctrl.send_command("DRIVE:-180:100")  # Short 0.08s reverse pulse to cancel momentum
+                    serial_ctrl.send_command("DRIVE:-180:100")
                     time.sleep(0.08)
                     serial_ctrl.send_command("STOP")
                     last_drive_speed = 0
@@ -352,7 +332,6 @@ def main():
                 time.sleep(0.5)
                 break
 
-            # Draw ROIs & Offset Contours (matching my_old_contour_colorvals_crt.py)
             img_disp = img.copy()
             draw_roi(img_disp, ROI1, (0, 255, 255), 2)
             draw_roi(img_disp, ROI2, (0, 255, 255), 2)
@@ -383,7 +362,6 @@ def main():
             cv2.putText(img_disp, wall_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
             cv2.putText(img_disp, us_text, (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-            # Display directly on monitor screen & keyboard controls
             if show_monitor_display:
                 cv2.imshow(window_name, img_disp)
                 key = cv2.waitKey(1) & 0xFF
@@ -415,7 +393,7 @@ def main():
                 "Home Baseline": start_snapshot
             })
 
-            time.sleep(0.02)  # 50 Hz vision loop
+            time.sleep(0.02)
 
     except KeyboardInterrupt:
         print("\n[SAFETY] Keyboard Interrupt. Halting bot...")

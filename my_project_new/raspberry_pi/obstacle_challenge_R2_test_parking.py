@@ -280,7 +280,7 @@ def main():
             # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (REDUCED TURN SPEED)
             # -------------------------------------------------------------
             if isTurning:
-                targetTurnAngle = 140 if turnDir == "left" else 60
+                targetTurnAngle = 60 if turnDir == "left" else 140
                 
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
@@ -308,7 +308,7 @@ def main():
                                    (turnDir == "right" and rightArea <= turnThresh)
 
                 if (lDetected or forced_dir != "none") and wallDropDetected:
-                    targetTurnAngle = 140 if turnDir == "left" else 60
+                    targetTurnAngle = 60 if turnDir == "left" else 140
                     t += 1
                     print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/{TARGET_TURNS}) at speed {turnSpeed}...")
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
