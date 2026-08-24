@@ -169,9 +169,9 @@ def main():
     normalSpeed = 245  # Full straightaway speed (245 PWM)
     turnSpeed = 235    # High cornering & pillar avoidance speed (235 PWM)
 
-    # PD Wall-Centering gains
-    kp = 0.015
-    kd = 0.01
+    # PD Wall-Centering gains (Reduced for 1st preference Pillar Avoidance)
+    kp = 0.005
+    kd = 0.003
 
     # PD Pillar Avoidance gains
     cKp = 0.25
@@ -435,6 +435,12 @@ def main():
                     time.sleep(0.6)
                     serial_ctrl.send_command("FORWARD")
                     continue
+
+                # 5 cm Side Ultrasonic Wall Safety Boundary (Allows robot to hug wall to avoid pillar, maintaining 5cm safety margin)
+                if 0 < l_us <= 5:
+                    angle = max(angle, 115) # Gentle steer right away from left wall
+                elif 0 < r_us <= 5:
+                    angle = min(angle, 85)  # Gentle steer left away from right wall
 
                 # Constrain angle between safe mechanical limits (60 to 140 deg)
                 angle = max(60, min(140, angle))
