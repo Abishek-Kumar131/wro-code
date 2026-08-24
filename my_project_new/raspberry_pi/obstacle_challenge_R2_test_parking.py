@@ -243,9 +243,47 @@ def main():
             # Get latest ultrasonic sensor telemetry from ESP32
             us_data = serial_ctrl.get_us_data()
             f_us = us_data.get("f", 0)
+            f1_us = us_data.get("f1", f_us)
+            f2_us = us_data.get("f2", f_us)
             l_us = us_data.get("l", 0)
             r_us = us_data.get("r", 0)
             b_us = us_data.get("b", 0)
+
+            # -------------------------------------------------------------
+            # 0. EMERGENCY STRAIGHT REVERSE FOR CLOSE OBSTACLE BLOCKS (<= 7 cm)
+            # -------------------------------------------------------------
+            too_close_front = (0 < f_us <= 7) or (0 < f1_us <= 7) or (0 < f2_us <= 7)
+            if too_close_front and not isTurning:
+                min_close = min([val for val in (f_us, f1_us, f2_us) if val > 0])
+                print("=" * 65)
+                print(f"[EMERGENCY REVERSE] Obstacle block too close! ({min_close} cm <= 7 cm)")
+                print("[EMERGENCY REVERSE] Reversing straight until clearance >= 22 cm is re-established...")
+                print("=" * 65)
+
+                rev_start = time.time()
+                while True:
+                    serial_ctrl.send_command("DRIVE:-180:100")
+                    time.sleep(0.05)
+                    us_check = serial_ctrl.get_us_data()
+                    curr_f = us_check.get("f", 0)
+                    curr_f1 = us_check.get("f1", curr_f)
+                    curr_f2 = us_check.get("f2", curr_f)
+
+                    rev_elapsed = time.time() - rev_start
+                    front_cleared = (curr_f >= 22 or curr_f == 0) and \
+                                    (curr_f1 >= 22 or curr_f1 == 0) and \
+                                    (curr_f2 >= 22 or curr_f2 == 0)
+
+                    if rev_elapsed >= 0.6 and front_cleared:
+                        break
+                    if rev_elapsed >= 2.0: # Safety cap
+                        break
+
+                serial_ctrl.send_command("STOP")
+                time.sleep(0.1)
+                serial_ctrl.send_command("FORWARD")
+                last_cmd_time = time.time()
+                last_drive_speed = 195
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
