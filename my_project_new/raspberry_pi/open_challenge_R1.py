@@ -367,8 +367,6 @@ def main():
             # 3. STRAIGHTAWAY WALL AVOIDANCE & DYNAMIC SPEED CONTROL (Laps 1-3)
             # -------------------------------------------------------------
             if not isTurning and not is_returning_home:
-                serial_ctrl.send_command("AUTO_US_OFF")
-
                 aDiff = rightArea - leftArea
                 steer_angle = int(100 - (aDiff * 0.02))
                 steer_angle = max(60, min(140, steer_angle))

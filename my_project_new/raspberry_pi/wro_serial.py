@@ -196,7 +196,6 @@ class WROSerialController:
 
             try:
                 self.serial_conn.write(message)
-                self.serial_conn.flush()
                 return True
             except (serial.SerialException, OSError) as e:
                 print(f"[ERROR] Failed to transmit command '{cmd_clean}' over USB: {e}", file=sys.stderr)

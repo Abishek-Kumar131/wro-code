@@ -455,7 +455,6 @@ def main():
                 time_elapsed = (currTime - last_cmd_time) >= 0.1
 
                 if angle_changed or speed_changed or time_elapsed:
-                    serial_ctrl.send_command("AUTO_US_OFF")
                     serial_ctrl.send_command(f"DRIVE:{currentSpeed}:{angle}")
                     last_steer_angle = angle
                     last_drive_speed = currentSpeed
