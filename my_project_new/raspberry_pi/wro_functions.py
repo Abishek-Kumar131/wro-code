@@ -1,19 +1,18 @@
-"""
-ROBOVANGUARD - WRO Future Engineers 2026
-Raspberry Pi 5 OpenCV Vision Functions, Camera Manager & Drawing Helpers
-(Includes Aspect Ratio Filtering, Dual-Layer HSV+LAB Masking, 0% Red/Orange Overlap, and 0% Black/Blue Overlap)
-"""
-
+import os
 import sys
 import time
 import threading
+
+# Suppress OpenCV C++ V4L2 backend warning spam
+os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
+
 import cv2
 import numpy as np
 from masks import rBlack, rMagenta
 
 
 class CameraManager:
-    """Universal Threaded Camera abstraction for Pi CSI Camera & USB Webcams with V4L2 auto-recovery."""
+    """Universal Threaded Camera abstraction for Pi CSI Camera & USB Webcams with stable V4L2 handling."""
 
     def __init__(self, force_webcam=False, device_index=0):
         self.force_webcam = force_webcam
@@ -48,8 +47,27 @@ class CameraManager:
                 print(f"[INFO] Picamera2 not available ({e}). Switching to USB Webcam...")
                 self._start_webcam()
 
+    def _open_device(self, idx):
+        """Attempts to open a specific V4L2 device index cleanly."""
+        for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
+            try:
+                cap = cv2.VideoCapture(idx, backend)
+                if cap and cap.isOpened():
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                    for _ in range(3):
+                        ret, frame = cap.read()
+                        if ret and frame is not None and frame.size > 0:
+                            return cap, frame
+                    cap.release()
+            except Exception:
+                pass
+        return None, None
+
     def _reconnect_camera(self):
-        """Safely release and re-enumerate USB camera nodes without crashing the thread."""
+        """Safely release and re-open USB camera only on true hardware disconnect."""
         if self.cap is not None:
             try:
                 self.cap.release()
@@ -57,33 +75,33 @@ class CameraManager:
                 pass
             self.cap = None
 
-        time.sleep(0.3)  # V4L2 release cooldown
-        search_indices = [self.device_index, 0, 1, 2, 3, 4, 6]
-        seen = set()
-        search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
+        time.sleep(0.5)  # Allow Linux V4L2 driver to fully release file descriptor
 
+        # Priority 1: Check known device index
+        cap, frame = self._open_device(self.device_index)
+        if cap is not None:
+            self.cap = cap
+            with self.lock:
+                self.current_frame = frame.copy()
+                self.last_frame_time = time.time()
+            print(f"[CAMERA RECOVERY] Reconnected on /dev/video{self.device_index}!", file=sys.stderr)
+            return True
+
+        # Priority 2: Scan alternative video devices
+        search_indices = [0, 2, 4, 1, 3]
         for idx in search_indices:
-            try:
-                cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-                if cap and cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                    
-                    for _ in range(3):
-                        ret, frame = cap.read()
-                        if ret and frame is not None and frame.size > 0:
-                            self.cap = cap
-                            self.device_index = idx
-                            with self.lock:
-                                self.current_frame = frame.copy()
-                                self.last_frame_time = time.time()
-                            print(f"[CAMERA RECOVERY] Camera reconnected on index {idx} (/dev/video{idx})!", file=sys.stderr)
-                            return True
-                    cap.release()
-            except Exception:
-                pass
+            if idx == self.device_index:
+                continue
+            cap, frame = self._open_device(idx)
+            if cap is not None:
+                self.cap = cap
+                self.device_index = idx
+                with self.lock:
+                    self.current_frame = frame.copy()
+                    self.last_frame_time = time.time()
+                print(f"[CAMERA RECOVERY] Reconnected on index {idx} (/dev/video{idx})!", file=sys.stderr)
+                return True
+
         return False
 
     def _start_webcam(self):
@@ -95,7 +113,7 @@ class CameraManager:
             self.thread.start()
             return
 
-        print("[ERROR] Could not find any working USB webcam across indices 0-6!", file=sys.stderr)
+        print("[ERROR] Could not find any working USB webcam!", file=sys.stderr)
         self.is_webcam = True
 
     def _update_webcam_thread(self):
@@ -103,8 +121,8 @@ class CameraManager:
         while self.running:
             if self.cap is None or not self.cap.isOpened():
                 if not self._reconnect_camera():
-                    time.sleep(0.3)
-                    continue
+                    time.sleep(0.5)
+                continue
 
             try:
                 ret, frame = self.cap.read()
@@ -115,16 +133,20 @@ class CameraManager:
                         self.last_frame_time = time.time()
                 else:
                     consecutive_failures += 1
-                    time.sleep(0.01)
+                    time.sleep(0.03)
 
-                if consecutive_failures >= 10:
-                    print(f"[CAMERA WARN] Frame stall on /dev/video{self.device_index}. Reconnecting...", file=sys.stderr)
+                # Only trigger reconnect if camera drops frames continuously for > 2.5 seconds (60 frames)
+                if consecutive_failures >= 60:
+                    print(f"[CAMERA WARN] Extended camera disconnect on /dev/video{self.device_index}. Reconnecting...", file=sys.stderr)
                     self._reconnect_camera()
                     consecutive_failures = 0
             except Exception as e:
-                print(f"[CAMERA ERROR] {e}. Reconnecting...", file=sys.stderr)
-                self._reconnect_camera()
-                consecutive_failures = 0
+                consecutive_failures += 1
+                time.sleep(0.05)
+                if consecutive_failures >= 30:
+                    print(f"[CAMERA ERROR] Capture exception ({e}). Reconnecting...", file=sys.stderr)
+                    self._reconnect_camera()
+                    consecutive_failures = 0
 
     def capture_array(self):
         if self.is_webcam:

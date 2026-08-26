@@ -228,11 +228,11 @@ def main():
 
             currTime = time.time()
 
-            # Navigation Failsafe / Frame Watchdog (Halts bot if camera stream stalls > 0.4s)
+            # Navigation Failsafe / Frame Watchdog (Halts bot only if camera stream stalls > 1.5s)
             frame_age = currTime - camera.get_last_frame_time()
-            if camera.get_last_frame_time() > 0 and frame_age > 0.4:
+            if camera.get_last_frame_time() > 0 and frame_age > 1.5:
                 if last_drive_speed != 0:
-                    print(f"[WATCHDOG FAILSAFE] Stale frame detected ({round(frame_age, 2)}s > 0.4s)! Halting bot until camera recovers...", file=sys.stderr)
+                    print(f"[WATCHDOG FAILSAFE] Stale frame detected ({round(frame_age, 2)}s > 1.5s)! Halting bot until camera recovers...", file=sys.stderr)
                     serial_ctrl.send_command("STOP")
                     last_drive_speed = 0
                 time.sleep(0.02)
