@@ -23,6 +23,7 @@ class CameraManager:
         self.is_webcam = False
         self.running = False
         self.current_frame = None
+        self.last_frame_time = 0.0
         self.lock = threading.Lock()
         self.thread = None
 
@@ -41,65 +42,69 @@ class CameraManager:
                 self.picam2.configure("preview")
                 self.picam2.start()
                 self.is_webcam = False
+                self.last_frame_time = time.time()
                 print("[SUCCESS] Picamera2 initialized!")
             except Exception as e:
                 print(f"[INFO] Picamera2 not available ({e}). Switching to USB Webcam...")
                 self._start_webcam()
 
-    def _start_webcam(self):
-        self.running = False
-        if self.cap:
+    def _reconnect_camera(self):
+        """Safely release and re-enumerate USB camera nodes without crashing the thread."""
+        if self.cap is not None:
             try:
                 self.cap.release()
             except Exception:
                 pass
             self.cap = None
-            time.sleep(0.3) # Give Linux V4L2 kernel driver 300ms to fully release /dev/video0 lock!
 
+        time.sleep(0.3)  # V4L2 release cooldown
         search_indices = [self.device_index, 0, 1, 2, 3, 4, 6]
         seen = set()
         search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
 
         for idx in search_indices:
-            print(f"[INFO] Testing USB Webcam index {idx}...")
-            for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-                try:
-                    cap = cv2.VideoCapture(idx, backend)
-                    if cap and cap.isOpened():
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                        
-                        # Grab test frames
-                        for _ in range(5):
-                            ret, frame = cap.read()
-                            if ret and frame is not None and frame.size > 0:
-                                print(f"[SUCCESS] USB Webcam initialized on index {idx} (/dev/video{idx})!")
-                                self.cap = cap
-                                self.device_index = idx
-                                self.is_webcam = True
-                                with self.lock:
-                                    self.current_frame = frame.copy()
-                                self.running = True
-                                self.thread = threading.Thread(target=self._update_webcam_thread, daemon=True)
-                                self.thread.start()
-                                return
-                        cap.release()
-                        time.sleep(0.2)
-                except Exception:
-                    pass
+            try:
+                cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+                if cap and cap.isOpened():
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                    
+                    for _ in range(3):
+                        ret, frame = cap.read()
+                        if ret and frame is not None and frame.size > 0:
+                            self.cap = cap
+                            self.device_index = idx
+                            with self.lock:
+                                self.current_frame = frame.copy()
+                                self.last_frame_time = time.time()
+                            print(f"[CAMERA RECOVERY] Camera reconnected on index {idx} (/dev/video{idx})!", file=sys.stderr)
+                            return True
+                    cap.release()
+            except Exception:
+                pass
+        return False
+
+    def _start_webcam(self):
+        self.running = False
+        if self._reconnect_camera():
+            self.is_webcam = True
+            self.running = True
+            self.thread = threading.Thread(target=self._update_webcam_thread, daemon=True)
+            self.thread.start()
+            return
 
         print("[ERROR] Could not find any working USB webcam across indices 0-6!", file=sys.stderr)
         self.is_webcam = True
 
     def _update_webcam_thread(self):
-        """Background daemon thread to continuously grab camera frames without blocking main thread."""
         consecutive_failures = 0
         while self.running:
-            if not self.cap or not self.cap.isOpened():
-                time.sleep(0.05)
-                continue
+            if self.cap is None or not self.cap.isOpened():
+                if not self._reconnect_camera():
+                    time.sleep(0.3)
+                    continue
 
             try:
                 ret, frame = self.cap.read()
@@ -107,48 +112,19 @@ class CameraManager:
                     consecutive_failures = 0
                     with self.lock:
                         self.current_frame = frame.copy()
+                        self.last_frame_time = time.time()
                 else:
                     consecutive_failures += 1
                     time.sleep(0.01)
 
-                if consecutive_failures >= 15:
-                    print(f"[CAMERA RECOVERY] USB frame stall on /dev/video{self.device_index}. Auto-reconnecting...", file=sys.stderr)
+                if consecutive_failures >= 10:
+                    print(f"[CAMERA WARN] Frame stall on /dev/video{self.device_index}. Reconnecting...", file=sys.stderr)
                     self._reconnect_camera()
                     consecutive_failures = 0
             except Exception as e:
-                print(f"[CAMERA WARN] Frame read exception: {e}. Reconnecting...", file=sys.stderr)
+                print(f"[CAMERA ERROR] {e}. Reconnecting...", file=sys.stderr)
                 self._reconnect_camera()
                 consecutive_failures = 0
-
-    def _reconnect_camera(self):
-        """Internal thread helper to safely re-open the USB camera without killing the background thread."""
-        if self.cap:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
-        time.sleep(0.2)
-
-        for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-            try:
-                cap = cv2.VideoCapture(self.device_index, backend)
-                if cap and cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                    for _ in range(3):
-                        ret, frame = cap.read()
-                        if ret and frame is not None and frame.size > 0:
-                            self.cap = cap
-                            with self.lock:
-                                self.current_frame = frame.copy()
-                            print(f"[CAMERA RECOVERY] Camera reconnected successfully on /dev/video{self.device_index}!", file=sys.stderr)
-                            return
-                    cap.release()
-            except Exception:
-                pass
 
     def capture_array(self):
         if self.is_webcam:
@@ -158,9 +134,17 @@ class CameraManager:
             return None
         else:
             try:
-                return self.picam2.capture_array()
+                frame = self.picam2.capture_array()
+                if frame is not None:
+                    self.last_frame_time = time.time()
+                return frame
             except Exception:
                 return None
+
+    def get_last_frame_time(self):
+        """Returns timestamp of the last successfully captured camera frame."""
+        with self.lock:
+            return self.last_frame_time
 
     def stop(self):
         self.running = False

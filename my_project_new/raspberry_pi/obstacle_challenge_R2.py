@@ -221,12 +221,18 @@ def main():
 
     try:
         while True:
-            img = camera.capture_array()
-            if img is None:
-                time.sleep(0.01)
+            currTime = time.time()
+
+            # Navigation Failsafe / Frame Watchdog (Halts bot if camera stream stalls > 0.4s)
+            frame_age = currTime - camera.get_last_frame_time()
+            if camera.get_last_frame_time() > 0 and frame_age > 0.4:
+                if last_drive_speed != 0:
+                    print(f"[WATCHDOG FAILSAFE] Stale frame detected ({round(frame_age, 2)}s > 0.4s)! Halting bot until camera recovers...", file=sys.stderr)
+                    serial_ctrl.send_command("STOP")
+                    last_drive_speed = 0
+                time.sleep(0.02)
                 continue
 
-            currTime = time.time()
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
 
             # Extract contours using strict separation logic
