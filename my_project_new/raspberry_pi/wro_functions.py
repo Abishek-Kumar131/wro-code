@@ -262,17 +262,27 @@ def find_red_pillar_contours(img_bgr, ROI, min_area=120):
 
 def find_orange_line_contours(img_bgr, ROI, min_area=100):
     """
-    Strict Orange Line segmentation (HSV H in [10..25], S >= 100, V >= 100)
-    with Red Hue exclusion to guarantee 0% Red/Orange overlap.
+    Robust Dual-Layer HSV + LAB Orange Line segmentation.
+    Enforces HSV Saturation >= 120 & LAB A >= 148 to completely eliminate 
+    false orange detections on white floor matting under warm arena lighting.
     """
     x1, y1, x2, y2 = ROI
     roi_bgr = img_bgr[y1:y2, x1:x2]
     roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2Lab)
 
-    orange_mask = cv2.inRange(roi_hsv, np.array([10, 100, 100]), np.array([25, 255, 255]))
+    # 1. HSV Orange Mask (H in [8..25], Saturation >= 120 to reject warm white floor)
+    hsv_orange = cv2.inRange(roi_hsv, np.array([8, 120, 90]), np.array([25, 255, 255]))
+
+    # 2. LAB Orange Mask (L in [15..235], A >= 148, B >= 148 for rich chroma)
+    lab_orange = cv2.inRange(roi_lab, np.array([15, 148, 148]), np.array([235, 230, 255]))
+
+    # Combine HSV & LAB Orange masks (AND logic guarantees 0% white floor overlap)
+    orange_mask = cv2.bitwise_and(hsv_orange, lab_orange)
 
     kernel = np.ones((5, 5), np.uint8)
     orange_mask = cv2.morphologyEx(orange_mask, cv2.MORPH_CLOSE, kernel)
+    orange_mask = cv2.GaussianBlur(orange_mask, (5, 5), 0)
 
     contours, _ = cv2.findContours(orange_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return [c for c in contours if cv2.contourArea(c) > min_area]

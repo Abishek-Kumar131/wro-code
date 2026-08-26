@@ -267,7 +267,7 @@ def main():
 
             cListLeft = find_black_wall_contours(img, ROI1)
             cListRight = find_black_wall_contours(img, ROI2)
-            cListOrange = find_contours(img_lab, rOrange, ROI3)
+            cListOrange = find_orange_line_contours(img, ROI3)
             cListBlue = find_contours(img_lab, rBlue, ROI3)
 
             leftArea = max_contour(cListLeft, ROI1)[0]

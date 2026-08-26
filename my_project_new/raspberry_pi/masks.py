@@ -10,9 +10,8 @@ CIELAB Color Space Threshold Ranges
 # L <= 65 (dark), A in [100, 155], B in [115, 145] (neutral center to exclude Blue where B < 110)
 rBlack = [[0, 100, 115], [65, 155, 145]]
 
-# Orange turn indicator lines (WIDENED RANGE for 100% reliable detection under all lighting):
-# L in [15, 255], A in [135, 220], B in [135, 255]
-rOrange = [[15, 135, 135], [255, 220, 255]]
+# Orange turn indicator lines (Strict A >= 148 & B >= 148 to exclude warm white floor light):
+rOrange = [[15, 148, 148], [235, 230, 255]]
 
 # Blue turn indicator lines:
 rBlue = [[20, 110, 0], [255, 170, 110]]
