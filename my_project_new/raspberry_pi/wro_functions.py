@@ -5,13 +5,15 @@ Raspberry Pi 5 OpenCV Vision Functions, Camera Manager & Drawing Helpers
 """
 
 import sys
+import time
+import threading
 import cv2
 import numpy as np
 from masks import rBlack, rMagenta
 
 
 class CameraManager:
-    """Universal Camera abstraction supporting both Picamera2 and OpenCV USB Webcams with V4L2 auto-recovery."""
+    """Universal Threaded Camera abstraction for Pi CSI Camera & USB Webcams with V4L2 auto-recovery."""
 
     def __init__(self, force_webcam=False, device_index=0):
         self.force_webcam = force_webcam
@@ -19,8 +21,10 @@ class CameraManager:
         self.cap = None
         self.picam2 = None
         self.is_webcam = False
-        self.failed_frame_count = 0
-        self.last_valid_frame = None
+        self.running = False
+        self.current_frame = None
+        self.lock = threading.Lock()
+        self.thread = None
 
     def start(self):
         if self.force_webcam:
@@ -43,14 +47,16 @@ class CameraManager:
                 self._start_webcam()
 
     def _start_webcam(self):
+        self.running = False
         if self.cap:
             try:
                 self.cap.release()
             except Exception:
                 pass
             self.cap = None
+            time.sleep(0.3) # Give Linux V4L2 kernel driver 300ms to fully release /dev/video0 lock!
 
-        search_indices = [self.device_index, 0, 1, 2, 3, 4, 5, 6, 8]
+        search_indices = [self.device_index, 0, 1, 2, 3, 4, 6]
         seen = set()
         search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
 
@@ -62,58 +68,67 @@ class CameraManager:
                     if cap and cap.isOpened():
                         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) # Force 1-frame buffer (eliminates V4L2 queue timeout & lag)
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                         
-                        # Test capture 1 frame to verify real webcam device
-                        for _ in range(3):
+                        # Grab test frames
+                        for _ in range(5):
                             ret, frame = cap.read()
                             if ret and frame is not None and frame.size > 0:
                                 print(f"[SUCCESS] USB Webcam initialized on index {idx} (/dev/video{idx})!")
                                 self.cap = cap
                                 self.device_index = idx
                                 self.is_webcam = True
-                                self.failed_frame_count = 0
-                                self.last_valid_frame = frame.copy()
+                                with self.lock:
+                                    self.current_frame = frame.copy()
+                                self.running = True
+                                self.thread = threading.Thread(target=self._update_webcam_thread, daemon=True)
+                                self.thread.start()
                                 return
                         cap.release()
+                        time.sleep(0.2)
                 except Exception:
                     pass
 
-        print("[ERROR] Could not find any working USB webcam across indices 0-8!", file=sys.stderr)
+        print("[ERROR] Could not find any working USB webcam across indices 0-6!", file=sys.stderr)
         self.is_webcam = True
-        self.cap = None
+
+    def _update_webcam_thread(self):
+        """Background daemon thread to continuously grab camera frames without blocking main thread."""
+        consecutive_failures = 0
+        while self.running and self.cap and self.cap.isOpened():
+            try:
+                ret, frame = self.cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    consecutive_failures = 0
+                    with self.lock:
+                        self.current_frame = frame.copy()
+                else:
+                    consecutive_failures += 1
+                    time.sleep(0.01)
+
+                # Auto-Recovery: If camera stalls for 10 consecutive frames (~0.3s), trigger silent reconnect
+                if consecutive_failures >= 10:
+                    print(f"[CAMERA WARN] Frame stall on /dev/video{self.device_index}. Auto-reconnecting...", file=sys.stderr)
+                    break
+            except Exception as e:
+                print(f"[CAMERA ERROR] Capture thread error: {e}", file=sys.stderr)
+                break
 
     def capture_array(self):
         if self.is_webcam:
-            if self.cap and self.cap.isOpened():
-                ret, frame = self.cap.read()
-                if ret and frame is not None and frame.size > 0:
-                    self.failed_frame_count = 0
-                    self.last_valid_frame = frame.copy()
-                    return frame
-                else:
-                    self.failed_frame_count += 1
-            else:
-                self.failed_frame_count += 1
-
-            # Auto-Recovery: Reconnect V4L2 device if 2 consecutive frame read timeouts occur
-            if self.failed_frame_count >= 2:
-                print(f"[CAMERA RECOVERY] V4L2 timeout detected on /dev/video{self.device_index}! Auto-reconnecting camera...", file=sys.stderr)
-                self._start_webcam()
-
-            return self.last_valid_frame
+            with self.lock:
+                if self.current_frame is not None:
+                    return self.current_frame.copy()
+            return None
         else:
             try:
-                frame = self.picam2.capture_array()
-                if frame is not None:
-                    self.last_valid_frame = frame
-                return frame
-            except Exception as e:
-                print(f"[WARNING] Picamera2 capture error: {e}", file=sys.stderr)
-                return self.last_valid_frame
+                return self.picam2.capture_array()
+            except Exception:
+                return None
 
     def stop(self):
+        self.running = False
         if self.is_webcam and self.cap:
             try:
                 self.cap.release()
