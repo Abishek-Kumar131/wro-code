@@ -96,7 +96,11 @@ class CameraManager:
     def _update_webcam_thread(self):
         """Background daemon thread to continuously grab camera frames without blocking main thread."""
         consecutive_failures = 0
-        while self.running and self.cap and self.cap.isOpened():
+        while self.running:
+            if not self.cap or not self.cap.isOpened():
+                time.sleep(0.05)
+                continue
+
             try:
                 ret, frame = self.cap.read()
                 if ret and frame is not None and frame.size > 0:
@@ -107,13 +111,44 @@ class CameraManager:
                     consecutive_failures += 1
                     time.sleep(0.01)
 
-                # Auto-Recovery: If camera stalls for 10 consecutive frames (~0.3s), trigger silent reconnect
-                if consecutive_failures >= 10:
-                    print(f"[CAMERA WARN] Frame stall on /dev/video{self.device_index}. Auto-reconnecting...", file=sys.stderr)
-                    break
+                if consecutive_failures >= 15:
+                    print(f"[CAMERA RECOVERY] USB frame stall on /dev/video{self.device_index}. Auto-reconnecting...", file=sys.stderr)
+                    self._reconnect_camera()
+                    consecutive_failures = 0
             except Exception as e:
-                print(f"[CAMERA ERROR] Capture thread error: {e}", file=sys.stderr)
-                break
+                print(f"[CAMERA WARN] Frame read exception: {e}. Reconnecting...", file=sys.stderr)
+                self._reconnect_camera()
+                consecutive_failures = 0
+
+    def _reconnect_camera(self):
+        """Internal thread helper to safely re-open the USB camera without killing the background thread."""
+        if self.cap:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        time.sleep(0.2)
+
+        for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
+            try:
+                cap = cv2.VideoCapture(self.device_index, backend)
+                if cap and cap.isOpened():
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                    for _ in range(3):
+                        ret, frame = cap.read()
+                        if ret and frame is not None and frame.size > 0:
+                            self.cap = cap
+                            with self.lock:
+                                self.current_frame = frame.copy()
+                            print(f"[CAMERA RECOVERY] Camera reconnected successfully on /dev/video{self.device_index}!", file=sys.stderr)
+                            return
+                    cap.release()
+            except Exception:
+                pass
 
     def capture_array(self):
         if self.is_webcam:
