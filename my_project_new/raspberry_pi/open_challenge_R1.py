@@ -235,8 +235,8 @@ def main():
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
 
     normalSpeed = 245      # Full straightaway speed (96% PWM)
-    turnSpeed = 195        # Reduced turn & cornering speed to prevent drifting when steering > 30 deg or max 40 deg
-    returnSpeed = 230      # Controlled approach speed for pin-point finish stopping (230 PWM)
+    turnSpeed = 245      # Reduced turn & cornering speed to prevent drifting when steering > 30 deg or max 40 deg
+    returnSpeed = 245      # Controlled approach speed for pin-point finish stopping (230 PWM)
 
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
     maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
