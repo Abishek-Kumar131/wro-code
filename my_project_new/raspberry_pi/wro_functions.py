@@ -12,7 +12,7 @@ from masks import rBlack, rMagenta
 
 
 class CameraManager:
-    """Universal Threaded Camera abstraction for Pi CSI Camera & USB Webcams with stable V4L2 handling."""
+    """Universal Camera abstraction supporting both Picamera2 and OpenCV USB Webcams with Zero-Lag Direct Capture."""
 
     def __init__(self, force_webcam=False, device_index=0):
         self.force_webcam = force_webcam
@@ -20,11 +20,6 @@ class CameraManager:
         self.cap = None
         self.picam2 = None
         self.is_webcam = False
-        self.running = False
-        self.current_frame = None
-        self.last_frame_time = 0.0
-        self.lock = threading.Lock()
-        self.thread = None
 
     def start(self):
         if self.force_webcam:
@@ -41,130 +36,60 @@ class CameraManager:
                 self.picam2.configure("preview")
                 self.picam2.start()
                 self.is_webcam = False
-                self.last_frame_time = time.time()
                 print("[SUCCESS] Picamera2 initialized!")
             except Exception as e:
                 print(f"[INFO] Picamera2 not available ({e}). Switching to USB Webcam...")
                 self._start_webcam()
 
-    def _open_device(self, idx):
-        """Attempts to open a specific V4L2 device index cleanly."""
-        for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-            try:
-                cap = cv2.VideoCapture(idx, backend)
-                if cap and cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                    for _ in range(3):
-                        ret, frame = cap.read()
-                        if ret and frame is not None and frame.size > 0:
-                            return cap, frame
-                    cap.release()
-            except Exception:
-                pass
-        return None, None
-
-    def _reconnect_camera(self):
-        """Safely release and re-open USB camera only on true hardware disconnect."""
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
-
-        time.sleep(0.5)  # Allow Linux V4L2 driver to fully release file descriptor
-
-        # Priority 1: Check known device index
-        cap, frame = self._open_device(self.device_index)
-        if cap is not None:
-            self.cap = cap
-            with self.lock:
-                self.current_frame = frame.copy()
-                self.last_frame_time = time.time()
-            print(f"[CAMERA RECOVERY] Reconnected on /dev/video{self.device_index}!", file=sys.stderr)
-            return True
-
-        # Priority 2: Scan alternative video devices
-        search_indices = [0, 2, 4, 1, 3]
-        for idx in search_indices:
-            if idx == self.device_index:
-                continue
-            cap, frame = self._open_device(idx)
-            if cap is not None:
-                self.cap = cap
-                self.device_index = idx
-                with self.lock:
-                    self.current_frame = frame.copy()
-                    self.last_frame_time = time.time()
-                print(f"[CAMERA RECOVERY] Reconnected on index {idx} (/dev/video{idx})!", file=sys.stderr)
-                return True
-
-        return False
-
     def _start_webcam(self):
-        self.running = False
-        if self._reconnect_camera():
-            self.is_webcam = True
-            self.running = True
-            self.thread = threading.Thread(target=self._update_webcam_thread, daemon=True)
-            self.thread.start()
-            return
+        search_indices = [self.device_index, 0, 1, 2, 3, 4, 5, 6, 8]
+        seen = set()
+        search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
 
-        print("[ERROR] Could not find any working USB webcam!", file=sys.stderr)
+        for idx in search_indices:
+            print(f"[INFO] Testing USB Webcam index {idx}...")
+            for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
+                try:
+                    cap = cv2.VideoCapture(idx, backend)
+                    if cap and cap.isOpened():
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                        
+                        # Test capture 1 frame to verify real webcam device
+                        for _ in range(3):
+                            ret, frame = cap.read()
+                            if ret and frame is not None and frame.size > 0:
+                                print(f"[SUCCESS] USB Webcam initialized on index {idx} (/dev/video{idx})!")
+                                self.cap = cap
+                                self.device_index = idx
+                                self.is_webcam = True
+                                return
+                        cap.release()
+                except Exception:
+                    pass
+
+        print("[ERROR] Could not find any working USB webcam across indices 0-8!", file=sys.stderr)
         self.is_webcam = True
-
-    def _update_webcam_thread(self):
-        while self.running:
-            if self.cap is None or not self.cap.isOpened():
-                if not self._reconnect_camera():
-                    time.sleep(0.5)
-                continue
-
-            try:
-                ret, frame = self.cap.read()
-                if ret and frame is not None and frame.size > 0:
-                    with self.lock:
-                        self.current_frame = frame.copy()
-                        self.last_frame_time = time.time()
-                else:
-                    # ret=False indicates a V4L2 driver / USB stall (select() timeout). Reconnect immediately!
-                    print(f"[CAMERA WARN] V4L2 frame read timeout on /dev/video{self.device_index}. Re-opening device...", file=sys.stderr)
-                    self._reconnect_camera()
-            except Exception as e:
-                print(f"[CAMERA ERROR] Capture exception ({e}). Re-opening device...", file=sys.stderr)
-                self._reconnect_camera()
+        self.cap = None
 
     def capture_array(self):
         if self.is_webcam:
-            with self.lock:
-                if self.current_frame is not None:
-                    return self.current_frame.copy()
+            if self.cap is not None:
+                ret, frame = self.cap.read()
+                if ret and frame is not None:
+                    return frame
             return None
         else:
-            try:
-                frame = self.picam2.capture_array()
-                if frame is not None:
-                    self.last_frame_time = time.time()
-                return frame
-            except Exception:
-                return None
-
-    def get_last_frame_time(self):
-        """Returns timestamp of the last successfully captured camera frame."""
-        with self.lock:
-            return self.last_frame_time
+            return self.picam2.capture_array()
 
     def stop(self):
-        self.running = False
         if self.is_webcam and self.cap:
             try:
                 self.cap.release()
             except Exception:
                 pass
-            self.cap = None
         elif self.picam2:
             try:
                 self.picam2.stop()
