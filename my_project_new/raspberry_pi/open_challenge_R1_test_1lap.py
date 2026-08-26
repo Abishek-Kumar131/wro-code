@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from wro_serial import WROSerialController
 from masks import rOrange, rBlack, rBlue
-from wro_functions import (CameraManager, find_black_wall_contours, find_contours, max_contour, draw_roi,
+from wro_functions import (CameraManager, find_black_wall_contours, find_orange_line_contours, find_contours, max_contour, draw_roi,
                            draw_offset_contours, display_variables)
 
 
@@ -139,6 +139,11 @@ def main():
 
     try:
         while True:
+            img = camera.capture_array()
+            if img is None:
+                time.sleep(0.01)
+                continue
+
             currTime = time.time()
 
             # Navigation Failsafe / Frame Watchdog (Halts bot if camera stream stalls > 0.4s)

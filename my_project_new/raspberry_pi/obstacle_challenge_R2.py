@@ -221,6 +221,11 @@ def main():
 
     try:
         while True:
+            img = camera.capture_array()
+            if img is None:
+                time.sleep(0.01)
+                continue
+
             currTime = time.time()
 
             # Navigation Failsafe / Frame Watchdog (Halts bot if camera stream stalls > 0.4s)
