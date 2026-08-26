@@ -52,16 +52,20 @@ class CameraManager:
                 try:
                     cap = cv2.VideoCapture(idx, backend)
                     if cap and cap.isOpened():
+                        # 1. Set FOURCC to hardware MJPG FIRST (drastically reduces USB bus bandwidth from 20MB/s to 1MB/s)
+                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                        # 2. Set Frame Dimensions
                         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                        cap.set(cv2.CAP_PROP_FPS, 30)
+                        # 3. Use double-buffering (2) to prevent Linux uvcvideo kernel driver FIFO underrun / select() timeout
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
                         
-                        # Test capture 1 frame to verify real webcam device
+                        # Test capture frames to verify real webcam device
                         for _ in range(3):
                             ret, frame = cap.read()
                             if ret and frame is not None and frame.size > 0:
-                                print(f"[SUCCESS] USB Webcam initialized on index {idx} (/dev/video{idx})!")
+                                print(f"[SUCCESS] USB Webcam initialized on index {idx} (/dev/video{idx}) in MJPG 640x480 mode!")
                                 self.cap = cap
                                 self.device_index = idx
                                 self.is_webcam = True
@@ -80,6 +84,12 @@ class CameraManager:
                 ret, frame = self.cap.read()
                 if ret and frame is not None:
                     return frame
+                else:
+                    # Quick recovery retry on transient single-frame drop
+                    for _ in range(2):
+                        ret, frame = self.cap.read()
+                        if ret and frame is not None:
+                            return frame
             return None
         else:
             return self.picam2.capture_array()
