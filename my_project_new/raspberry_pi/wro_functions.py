@@ -11,7 +11,7 @@ from masks import rBlack, rMagenta
 
 
 class CameraManager:
-    """Universal Camera abstraction supporting both Picamera2 and OpenCV USB Webcams."""
+    """Universal Camera abstraction supporting both Picamera2 and OpenCV USB Webcams with V4L2 auto-recovery."""
 
     def __init__(self, force_webcam=False, device_index=0):
         self.force_webcam = force_webcam
@@ -19,6 +19,8 @@ class CameraManager:
         self.cap = None
         self.picam2 = None
         self.is_webcam = False
+        self.failed_frame_count = 0
+        self.last_valid_frame = None
 
     def start(self):
         if self.force_webcam:
@@ -41,6 +43,13 @@ class CameraManager:
                 self._start_webcam()
 
     def _start_webcam(self):
+        if self.cap:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
         search_indices = [self.device_index, 0, 1, 2, 3, 4, 5, 6, 8]
         seen = set()
         search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
@@ -53,6 +62,7 @@ class CameraManager:
                     if cap and cap.isOpened():
                         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) # Force 1-frame buffer (eliminates V4L2 queue timeout & lag)
                         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                         
                         # Test capture 1 frame to verify real webcam device
@@ -63,6 +73,8 @@ class CameraManager:
                                 self.cap = cap
                                 self.device_index = idx
                                 self.is_webcam = True
+                                self.failed_frame_count = 0
+                                self.last_valid_frame = frame.copy()
                                 return
                         cap.release()
                 except Exception:
@@ -74,17 +86,40 @@ class CameraManager:
 
     def capture_array(self):
         if self.is_webcam:
-            if self.cap:
+            if self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
-                if ret and frame is not None:
+                if ret and frame is not None and frame.size > 0:
+                    self.failed_frame_count = 0
+                    self.last_valid_frame = frame.copy()
                     return frame
-            return None
+                else:
+                    self.failed_frame_count += 1
+            else:
+                self.failed_frame_count += 1
+
+            # Auto-Recovery: Reconnect V4L2 device if 2 consecutive frame read timeouts occur
+            if self.failed_frame_count >= 2:
+                print(f"[CAMERA RECOVERY] V4L2 timeout detected on /dev/video{self.device_index}! Auto-reconnecting camera...", file=sys.stderr)
+                self._start_webcam()
+
+            return self.last_valid_frame
         else:
-            return self.picam2.capture_array()
+            try:
+                frame = self.picam2.capture_array()
+                if frame is not None:
+                    self.last_valid_frame = frame
+                return frame
+            except Exception as e:
+                print(f"[WARNING] Picamera2 capture error: {e}", file=sys.stderr)
+                return self.last_valid_frame
 
     def stop(self):
         if self.is_webcam and self.cap:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
         elif self.picam2:
             try:
                 self.picam2.stop()
