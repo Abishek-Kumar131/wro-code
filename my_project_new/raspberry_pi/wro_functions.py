@@ -117,7 +117,6 @@ class CameraManager:
         self.is_webcam = True
 
     def _update_webcam_thread(self):
-        consecutive_failures = 0
         while self.running:
             if self.cap is None or not self.cap.isOpened():
                 if not self._reconnect_camera():
@@ -127,26 +126,16 @@ class CameraManager:
             try:
                 ret, frame = self.cap.read()
                 if ret and frame is not None and frame.size > 0:
-                    consecutive_failures = 0
                     with self.lock:
                         self.current_frame = frame.copy()
                         self.last_frame_time = time.time()
                 else:
-                    consecutive_failures += 1
-                    time.sleep(0.03)
-
-                # Only trigger reconnect if camera drops frames continuously for > 2.5 seconds (60 frames)
-                if consecutive_failures >= 60:
-                    print(f"[CAMERA WARN] Extended camera disconnect on /dev/video{self.device_index}. Reconnecting...", file=sys.stderr)
+                    # ret=False indicates a V4L2 driver / USB stall (select() timeout). Reconnect immediately!
+                    print(f"[CAMERA WARN] V4L2 frame read timeout on /dev/video{self.device_index}. Re-opening device...", file=sys.stderr)
                     self._reconnect_camera()
-                    consecutive_failures = 0
             except Exception as e:
-                consecutive_failures += 1
-                time.sleep(0.05)
-                if consecutive_failures >= 30:
-                    print(f"[CAMERA ERROR] Capture exception ({e}). Reconnecting...", file=sys.stderr)
-                    self._reconnect_camera()
-                    consecutive_failures = 0
+                print(f"[CAMERA ERROR] Capture exception ({e}). Re-opening device...", file=sys.stderr)
+                self._reconnect_camera()
 
     def capture_array(self):
         if self.is_webcam:
