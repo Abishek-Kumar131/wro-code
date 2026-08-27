@@ -88,7 +88,7 @@ def wait_for_button(gpio_pin=17, active_high=False):
                 confirm_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
 
             if confirm_pressed:
-                print("\n[LAUNCH] PHYSICAL BUTTON PRESSED! Launching Round 1 Open Challenge...")
+                print("\n[LAUNCH] PHYSICAL BUTTON PRESSED! Launching Round 2 Obstacle Challenge...")
                 return True
 
         # Check terminal stdin ONLY if running interactively in terminal (NOT in systemd background)
@@ -104,6 +104,9 @@ def main():
     gpio_pin = 17
     active_high = "--active-high" in sys.argv
 
+    # Round selector: default to Round 2 Obstacle Challenge (obstacle_challenge_R2.py)
+    target_script = "open_challenge_R1.py" if "--r1" in sys.argv else "obstacle_challenge_R2.py"
+
     if "--pin" in sys.argv:
         idx = sys.argv.index("--pin")
         if idx + 1 < len(sys.argv):
@@ -111,13 +114,13 @@ def main():
 
     wait_for_button(gpio_pin, active_high)
 
-    # Path to open_challenge_R1.py script
+    # Path to target round challenge script
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    r1_script = os.path.join(script_dir, "open_challenge_R1.py")
+    target_path = os.path.join(script_dir, target_script)
 
-    # Forward any arguments like --no-display or --webcam
-    extra_args = [arg for arg in sys.argv[1:] if arg not in ("--pin", str(gpio_pin), "--active-high")]
-    cmd = [sys.executable, r1_script, "--no-wait"] + extra_args
+    # Forward any arguments like --no-display, --webcam, or --dir
+    extra_args = [arg for arg in sys.argv[1:] if arg not in ("--pin", str(gpio_pin), "--active-high", "--r1", "--r2")]
+    cmd = [sys.executable, target_path, "--no-wait"] + extra_args
     print(f"[EXEC] Running: {' '.join(cmd)}")
     
     try:

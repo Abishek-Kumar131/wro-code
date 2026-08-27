@@ -21,6 +21,7 @@ Hybrid Vision Architecture:
 
 import sys
 import time
+import select
 import math
 import cv2
 import numpy as np
@@ -29,6 +30,103 @@ from masks import rMagenta, rRed, rGreen, rBlue, rOrange, rBlack, lotType
 from wro_functions import (CameraManager, find_black_wall_contours, find_red_pillar_contours,
                            find_orange_line_contours, find_contours, max_contour, draw_roi,
                            draw_offset_contours, display_variables)
+
+
+def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camera=None, active_high=False):
+    """Waits for a physical push button press on Pi 5 GPIO pin before starting autonomous run."""
+    print("=" * 65)
+    print(f"[COMPETITION STANDBY] Waiting for physical button press on GPIO {gpio_pin}...")
+    print("=" * 65)
+
+    is_interactive = sys.stdin.isatty()
+    if is_interactive:
+        print("  -> Running in interactive terminal (Press ENTER or Button to start)")
+    else:
+        print("  -> Running as background service (Waiting strictly for physical GPIO Button)")
+
+    button_obj = None
+    try:
+        from gpiozero import Button
+        pull_up = not active_high
+        button_obj = Button(gpio_pin, pull_up=pull_up, bounce_time=0.05)
+        print(f"[GPIO] Listening on GPIO {gpio_pin} (pull_up={pull_up} via gpiozero).")
+    except Exception:
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setmode(GPIO.BCM)
+            pud = GPIO.PUD_DOWN if active_high else GPIO.PUD_UP
+            GPIO.setup(gpio_pin, GPIO.IN, pull_up_down=pud)
+            print(f"[GPIO] Listening on GPIO {gpio_pin} (via RPi.GPIO).")
+        except Exception as e:
+            print(f"[GPIO INFO] Hardware GPIO library not loaded ({e}).")
+
+    time.sleep(0.5)
+
+    settle_start = time.time()
+    while True:
+        is_pressed = False
+        if button_obj is not None:
+            is_pressed = button_obj.is_pressed
+        elif 'GPIO' in sys.modules:
+            import RPi.GPIO as GPIO
+            pin_val = GPIO.input(gpio_pin)
+            is_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
+
+        if not is_pressed or (time.time() - settle_start > 3.0):
+            break
+        time.sleep(0.05)
+
+    print("[GPIO] READY FOR MATCH! Waiting for button press or ENTER key...")
+
+    while True:
+        is_pressed = False
+        if button_obj is not None:
+            is_pressed = button_obj.is_pressed
+        elif 'GPIO' in sys.modules:
+            import RPi.GPIO as GPIO
+            pin_val = GPIO.input(gpio_pin)
+            is_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
+
+        if is_pressed:
+            time.sleep(0.08)
+            confirm_pressed = False
+            if button_obj is not None:
+                confirm_pressed = button_obj.is_pressed
+            elif 'GPIO' in sys.modules:
+                import RPi.GPIO as GPIO
+                pin_val = GPIO.input(gpio_pin)
+                confirm_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
+
+            if confirm_pressed:
+                print("\n" + "=" * 65)
+                print("[MATCH START] PHYSICAL BUTTON PRESSED! Launching Round 2 Obstacle Challenge...")
+                print("=" * 65)
+                return True
+
+        if is_interactive:
+            if sys.stdin in select.select([sys.stdin], [], [], 0.02)[0]:
+                line = sys.stdin.readline()
+                print("\n" + "=" * 65)
+                print("[MATCH START] ENTER KEY PRESSED! Launching Round 2 Obstacle Challenge...")
+                print("=" * 65)
+                return True
+
+        if show_display and camera is not None:
+            standby_frame = camera.capture_array()
+            if standby_frame is not None:
+                disp = standby_frame.copy()
+                cv2.putText(disp, "ROUND 2 STANDBY - PRESS BUTTON TO START", (20, 240),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.imshow(window_name, disp)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 13 or key == 32:  # ENTER or SPACE
+                    print("\n[MATCH START] GUI Key Pressed! Starting Round 2 Obstacle Challenge...")
+                    return True
+                elif key == 27 or key == ord('q'):
+                    print("\n[ABORT] User cancelled from GUI window.")
+                    sys.exit(0)
+
+        time.sleep(0.03)
 
 
 class Pillar:
@@ -93,6 +191,14 @@ def main():
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
+    skip_button = "--no-wait" in sys.argv or "--instant-start" in sys.argv
+    active_high = "--active-high" in sys.argv
+
+    gpio_pin = 17
+    if "--pin" in sys.argv:
+        idx = sys.argv.index("--pin")
+        if idx + 1 < len(sys.argv):
+            gpio_pin = int(sys.argv[idx + 1])
 
     # Check for direction override in arguments (--dir left or --dir right)
     forced_dir = "none"
@@ -138,6 +244,13 @@ def main():
                 cv2.imshow(window_name, warmup_frame)
                 cv2.waitKey(1)
         time.sleep(0.04)
+
+    # ------------------------------------------------------------------------
+    # COMPETITION STARTUP: Wait for physical button press on Pi 5 GPIO pin
+    # ------------------------------------------------------------------------
+    if not skip_button:
+        wait_for_button_press(gpio_pin=gpio_pin, show_display=show_monitor_display,
+                              window_name=window_name, camera=camera, active_high=active_high)
 
     # 3. Safety Countdown before bot starts driving
     print("\n[READY] Obstacle Round 2 Engine Ready!")
