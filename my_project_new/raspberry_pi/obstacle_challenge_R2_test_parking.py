@@ -251,7 +251,7 @@ def main():
             b_us = us_data.get("b", 0)
 
             # -------------------------------------------------------------
-            # 0. EMERGENCY ANGLED REVERSE FOR CLOSE OBSTACLE BLOCKS (<= 12 cm or Touch)
+            # 0. EMERGENCY ANGLED REVERSE FOR CLOSE OBSTACLE BLOCKS & WALL COLLISIONS
             # -------------------------------------------------------------
             red_pillar_area = max_contour(contours_red, ROI3)[0]
             green_pillar_area = max_contour(contours_green, ROI3)[0]
@@ -259,9 +259,10 @@ def main():
 
             front_sensors = [v for v in (f_us, f1_us, f2_us) if 0 < v <= 12]
             has_close_us = len(front_sensors) > 0
-            bumper_touch = (f_us == 0 or f1_us == 0 or f2_us == 0) and close_visual_pillar
+            bumper_touch = (f_us == 0 or f1_us == 0 or f2_us == 0) and (close_visual_pillar or leftArea > 1400 or rightArea > 1400)
+            side_wall_jam = (0 < l_us <= 6) or (0 < r_us <= 6)
 
-            if (has_close_us or bumper_touch) and not isTurning and currTime >= reverseCooldownUntil:
+            if (has_close_us or bumper_touch or side_wall_jam) and not isTurning and currTime >= reverseCooldownUntil:
                 min_close = min(front_sensors) if front_sensors else 0
 
                 # Determine dynamic reverse steering angle to angle nose toward open passage:
@@ -270,13 +271,17 @@ def main():
                     rev_steer = 135 # Steer RIGHT while reversing to angle nose away from RED pillar on left
                 elif green_pillar_area > 800:
                     rev_steer = 65  # Steer LEFT while reversing to angle nose away from GREEN pillar on right
+                elif (0 < r_us <= 6) or (0 < f2_us <= 11 and rightArea > leftArea) or (rightArea > 1300):
+                    rev_steer = 65  # Steer LEFT in reverse -> pulls nose away from close right/inner wall
+                elif (0 < l_us <= 6) or (0 < f1_us <= 11 and leftArea > rightArea) or (leftArea > 1300):
+                    rev_steer = 135 # Steer RIGHT in reverse -> pulls nose away from close left/inner wall
                 elif leftArea > rightArea:
                     rev_steer = 130 # Angle away from close left wall
                 elif rightArea > leftArea:
                     rev_steer = 70  # Angle away from close right wall
 
                 print("=" * 65)
-                print(f"[EMERGENCY REVERSE] Squeeze obstacle detected! (US: {min_close} cm | Rev Steer: {rev_steer}°)")
+                print(f"[EMERGENCY REVERSE] Squeeze obstacle / wall detected! (US: {min_close} cm | Rev Steer: {rev_steer}°)")
                 print(f"[EMERGENCY REVERSE] Reversing at angle {rev_steer}° to align nose into open passage...")
                 print("=" * 65)
 
@@ -288,15 +293,21 @@ def main():
                     curr_f = us_check.get("f", 0)
                     curr_f1 = us_check.get("f1", curr_f)
                     curr_f2 = us_check.get("f2", curr_f)
+                    curr_b = us_check.get("b", 0)
 
                     rev_elapsed = time.time() - rev_start
+
+                    if curr_b > 0 and curr_b <= 8:
+                        print(f"[SAFETY] Rear wall proximity ({curr_b}cm)! Stopping reverse.")
+                        break
+
                     front_cleared = (curr_f >= 20 or curr_f == 0) and \
                                     (curr_f1 >= 20 or curr_f1 == 0) and \
                                     (curr_f2 >= 20 or curr_f2 == 0)
 
-                    if rev_elapsed >= 0.5 and front_cleared:
+                    if rev_elapsed >= 0.45 and front_cleared:
                         break
-                    if rev_elapsed >= 1.5: # Safety cap
+                    if rev_elapsed >= 1.2: # Safety cap
                         break
 
                 serial_ctrl.send_command("STOP")

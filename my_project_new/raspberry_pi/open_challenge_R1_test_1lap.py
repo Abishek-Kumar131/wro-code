@@ -114,6 +114,7 @@ def main():
     turnStartTime = 0
     lineLockoutUntil = 0   # 3.5s line detection lockout timer
     turnCooldownUntil = 0  # 3.5s turn trigger cooldown timer
+    reverseCooldownUntil = 0 # 1.2s emergency reverse cooldown timer
     lockoutDuration = 3.5  # Exactly 3.5 seconds lockout
 
     normalSpeed = 245      # Full straightaway speed (96% PWM)
@@ -157,11 +158,86 @@ def main():
             orangeArea = max_contour(cListOrange, ROI3)[0]
             blueArea = max_contour(cListBlue, ROI3)[0]
 
-            us_data = serial_ctrl.get_us_data() if is_returning_home else {}
+            # Get latest continuous ultrasonic sensor telemetry from ESP32
+            us_data = serial_ctrl.get_us_data()
             f_us = us_data.get("f", 0)
+            f1_us = us_data.get("f1", f_us)
+            f2_us = us_data.get("f2", f_us)
             l_us = us_data.get("l", 0)
             r_us = us_data.get("r", 0)
             b_us = us_data.get("b", 0)
+
+            # -------------------------------------------------------------
+            # 0. EMERGENCY ANGLED REVERSE FOR INNER & FRONT WALL COLLISIONS
+            # -------------------------------------------------------------
+            hit_right_inner = (turnDir == "right" and (0 < f2_us <= 13 or 0 < r_us <= 7 or ((f2_us == 0 or r_us == 0) and rightArea > 1300))) or \
+                              (0 < r_us <= 6) or (0 < f2_us <= 11 and rightArea > leftArea)
+            hit_left_inner  = (turnDir == "left" and (0 < f1_us <= 13 or 0 < l_us <= 7 or ((f1_us == 0 or l_us == 0) and leftArea > 1300))) or \
+                              (0 < l_us <= 6) or (0 < f1_us <= 11 and leftArea > rightArea)
+            hit_front_wall  = (0 < f_us <= 12) or ((0 < f1_us <= 12) and (0 < f2_us <= 12)) or \
+                              ((f_us == 0 or f1_us == 0 or f2_us == 0) and (leftArea > 1500 or rightArea > 1500))
+
+            if (hit_right_inner or hit_left_inner or hit_front_wall) and currTime >= reverseCooldownUntil and not home_stop_initiated:
+                if hit_right_inner:
+                    rev_steer = 65   # Steer LEFT in reverse -> pulls front nose away from RIGHT/INNER wall
+                    wall_name = "INNER/RIGHT WALL"
+                elif hit_left_inner:
+                    rev_steer = 135  # Steer RIGHT in reverse -> pulls front nose away from LEFT/INNER wall
+                    wall_name = "INNER/LEFT WALL"
+                else:
+                    rev_steer = 65 if turnDir == "right" else 135
+                    wall_name = "FRONT WALL"
+
+                print("=" * 65)
+                print(f"[EMERGENCY REVERSE] Collision detected with {wall_name}!")
+                print(f"[SENSORS] F:{f_us} F1:{f1_us} F2:{f2_us} L:{l_us} R:{r_us} B:{b_us} | Vision L:{leftArea}px R:{rightArea}px")
+                print(f"[REVERSE ACTION] Reversing with angle {rev_steer}° to free bot from wall...")
+                print("=" * 65)
+
+                serial_ctrl.send_command("STOP")
+                time.sleep(0.04)
+
+                rev_start = time.time()
+                while True:
+                    serial_ctrl.send_command(f"DRIVE:-235:{rev_steer}")
+                    time.sleep(0.05)
+                    us_check = serial_ctrl.get_us_data()
+                    curr_f = us_check.get("f", 0)
+                    curr_f1 = us_check.get("f1", curr_f)
+                    curr_f2 = us_check.get("f2", curr_f)
+                    curr_b = us_check.get("b", 0)
+
+                    rev_elapsed = time.time() - rev_start
+
+                    # Rear collision safety guard
+                    if curr_b > 0 and curr_b <= 8:
+                        print(f"[SAFETY] Rear wall proximity ({curr_b}cm)! Stopping reverse.")
+                        break
+
+                    # Clearance check: front sensors must see open track (>= 18cm or no obstacle)
+                    front_cleared = (curr_f >= 18 or curr_f == 0) and \
+                                    (curr_f1 >= 18 or curr_f1 == 0) and \
+                                    (curr_f2 >= 18 or curr_f2 == 0)
+
+                    if rev_elapsed >= 0.45 and front_cleared:
+                        break
+                    if rev_elapsed >= 1.2:  # Safety timeout cap
+                        break
+
+                serial_ctrl.send_command("STOP")
+                time.sleep(0.05)
+
+                # If collided during an active turn, reset turn state so vision re-acquires the lane cleanly
+                if isTurning:
+                    isTurning = False
+                    turnCooldownUntil = time.time() + 0.5
+
+                serial_ctrl.send_command("FORWARD")
+                reverseCooldownUntil = time.time() + 1.2
+                last_cmd_time = time.time()
+                last_drive_speed = normalSpeed
+                last_steer_angle = 100
+                continue
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
@@ -171,31 +247,30 @@ def main():
                     if orangeArea > 100 and orangeArea > blueArea:
                         turnDir = "right"
                         lDetected = True
-                        lineLockoutUntil = currTime + lockoutDuration
+                        lineLockoutUntil = currTime + 1.2
                         print(f"[FIRST-COLOR LOCK] First Line Detected: ORANGE ({orangeArea} px) -> Permanently Locking Direction to RIGHT!")
                     elif blueArea > 100 and blueArea > orangeArea:
                         turnDir = "left"
                         lDetected = True
-                        lineLockoutUntil = currTime + lockoutDuration
+                        lineLockoutUntil = currTime + 1.2
                         print(f"[FIRST-COLOR LOCK] First Line Detected: BLUE ({blueArea} px) -> Permanently Locking Direction to LEFT!")
                 
                 elif turnDir == "right":
                     if orangeArea > 100:
                         lDetected = True
-                        lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[LOCKED MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT (3.5s Line Lockout)")
+                        lineLockoutUntil = currTime + 1.2
+                        print(f"[LOCKED MARKER] Detected ORANGE Line ({orangeArea} px) -> Track Dir = RIGHT")
                 
                 elif turnDir == "left":
                     if blueArea > 100:
                         lDetected = True
-                        lineLockoutUntil = currTime + lockoutDuration
-                        print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT (3.5s Line Lockout)")
+                        lineLockoutUntil = currTime + 1.2
+                        print(f"[LOCKED MARKER] Detected BLUE Line ({blueArea} px) -> Track Dir = LEFT")
 
             # -------------------------------------------------------------
-            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (CORRECTED: 60=LEFT, 140=RIGHT)
+            # 2. HYBRID CORNER TURN & DYNAMIC VISION EXIT (60=LEFT, 140=RIGHT)
             # -------------------------------------------------------------
             if isTurning and not is_returning_home:
-                # FIX: 60 deg is LEFT turn, 140 deg is RIGHT turn!
                 targetTurnAngle = 60 if turnDir == "left" else 140
                 
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
@@ -212,8 +287,8 @@ def main():
 
                 if newWallAcquired or maxTimeoutReached:
                     isTurning = False
-                    turnCooldownUntil = currTime + lockoutDuration
-                    lineLockoutUntil = currTime + lockoutDuration
+                    turnCooldownUntil = currTime + 0.8
+                    lineLockoutUntil = currTime + 0.8
                     exit_reason = "WALL_REACQUIRED" if newWallAcquired else "MAX_TIMEOUT"
                     print(f"[NAV EVENT] Turn {t}/{TARGET_TURNS} ({turnDir.upper()}) EXITED via {exit_reason} in {round(turnElapsed, 2)}s!")
 
@@ -231,11 +306,12 @@ def main():
                                    (turnDir == "left" and leftArea <= turnThresh) or \
                                    (turnDir == "right" and rightArea <= turnThresh)
 
-                if (lDetected or forced_dir != "none") and wallDropDetected:
-                    # FIX: 60 deg is LEFT turn, 140 deg is RIGHT turn!
+                # Trigger turn if wall dropped and direction is locked (or marker was seen)
+                if (lDetected or turnDir != "none" or forced_dir != "none") and wallDropDetected:
                     targetTurnAngle = 60 if turnDir == "left" else 140
                     t += 1
-                    print(f"[NAV EVENT] Marker Seen + Wall Drop! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/{TARGET_TURNS}) angle={targetTurnAngle}...")
+                    marker_info = "Marker + Wall Drop" if lDetected else "Inner Wall Drop"
+                    print(f"[NAV EVENT] {marker_info}! (L:{leftArea} R:{rightArea}) -> Triggering Turn ({t}/{TARGET_TURNS}) angle={targetTurnAngle}...")
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
                     last_drive_speed = turnSpeed
@@ -243,16 +319,43 @@ def main():
                     isTurning = True
                     turnStartTime = currTime
                     lDetected = False
-                    turnCooldownUntil = currTime + maxTurnDuration + lockoutDuration
+                    turnCooldownUntil = currTime + maxTurnDuration + 0.8
 
             # -------------------------------------------------------------
             # 3. STRAIGHTAWAY WALL AVOIDANCE & DYNAMIC SPEED CONTROL (1-Lap Run)
             # -------------------------------------------------------------
             if not isTurning and not is_returning_home:
-                aDiff = rightArea - leftArea
-                steer_angle = int(100 - (aDiff * 0.02))
-                steer_angle = max(60, min(140, steer_angle))
+                # Check whether both walls or single wall is in view
+                both_walls_visible = (leftArea > 250 and rightArea > 250)
 
+                if both_walls_visible:
+                    # Dual-wall proportional centering
+                    aDiff = rightArea - leftArea
+                    steer_angle = int(100 - (aDiff * 0.015))
+                elif turnDir == "right" and rightArea <= 250:
+                    # Approaching RIGHT turn: Right (inner) wall dropped.
+                    # Do NOT steer hard right into inner wall! Maintain straight course using outer left wall.
+                    left_err = leftArea - 900
+                    steer_angle = int(100 - (left_err * 0.008))
+                    steer_angle = max(90, min(110, steer_angle))
+                elif turnDir == "left" and leftArea <= 250:
+                    # Approaching LEFT turn: Left (inner) wall dropped.
+                    # Do NOT steer hard left into inner wall! Maintain straight course using outer right wall.
+                    right_err = rightArea - 900
+                    steer_angle = int(100 + (right_err * 0.008))
+                    steer_angle = max(90, min(110, steer_angle))
+                else:
+                    # Single wall fallback
+                    aDiff = rightArea - leftArea
+                    steer_angle = int(100 - (aDiff * 0.01))
+
+                # Sensor side-proximity safety nudges
+                if 0 < r_us <= 12:
+                    steer_angle = min(steer_angle, 80) # Nudge left away from right wall
+                elif 0 < l_us <= 12:
+                    steer_angle = max(steer_angle, 120) # Nudge right away from left wall
+
+                steer_angle = max(60, min(140, steer_angle))
                 steerDeflection = abs(steer_angle - 100)
                 currentSpeed = turnSpeed if steerDeflection > 30 else normalSpeed
 
@@ -354,7 +457,7 @@ def main():
             active_speed = last_drive_speed if last_drive_speed is not None else normalSpeed
             telemetry_text = f"Cam:{cam_type} | State:{state_str} | Speed:{active_speed} | Turns:{t}/{TARGET_TURNS}"
             wall_text = f"Walls -> Left:{leftArea}px | Right:{rightArea}px | LineLock:{lock_str}"
-            us_text = f"US Sensors -> F:{f_us}cm | L:{l_us}cm | R:{r_us}cm | B:{b_us}cm"
+            us_text = f"US -> F:{f_us} F1:{f1_us} F2:{f2_us} | L:{l_us} R:{r_us} B:{b_us}"
 
             cv2.putText(img_disp, telemetry_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 204), 2)
             cv2.putText(img_disp, wall_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
@@ -385,6 +488,8 @@ def main():
                 "Left Wall Area (px)": leftArea,
                 "Right Wall Area (px)": rightArea,
                 "US Front (cm)": f_us,
+                "US Front1 (cm)": f1_us,
+                "US Front2 (cm)": f2_us,
                 "US Left (cm)": l_us,
                 "US Right (cm)": r_us,
                 "US Back (cm)": b_us,
