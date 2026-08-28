@@ -145,18 +145,29 @@ class WROSerialController:
             try:
                 if self.serial_conn and self.serial_conn.is_open:
                     if self.serial_conn.in_waiting > 0:
-                        line = self.serial_conn.readline().decode("utf-8", errors="replace").strip()
+                        raw_line = self.serial_conn.readline()
+                        try:
+                            line = raw_line.decode("utf-8", errors="ignore").strip()
+                        except Exception:
+                            continue
+
                         if line:
-                            self.last_ack = line
-                            if line.startswith("US:"):
-                                self._parse_us_telemetry(line)
-                            if self.on_ack_callback:
-                                self.on_ack_callback(line)
-                            elif not line.startswith("US:"):
-                                print(f"[ESP32 >> RPi5]: {line}")
+                            # Filter out noise lines containing non-ASCII / control chars
+                            clean_line = "".join(ch for ch in line if ch.isprintable() or ch in '\r\n\t').strip()
+                            if not clean_line or len(clean_line) < 2:
+                                continue
+
+                            self.last_ack = clean_line
+                            if clean_line.startswith("US:"):
+                                self._parse_us_telemetry(clean_line)
+                            elif self.on_ack_callback:
+                                self.on_ack_callback(clean_line)
+                            elif any(clean_line.startswith(pfx) for pfx in ("ACK:", "ERR:", "STATUS:", "BOOT:", "INFO:", "WRO")):
+                                print(f"[ESP32 >> RPi5]: {clean_line}")
                 time.sleep(0.01)
             except Exception as e:
-                print(f"[WARNING] Serial read error: {e}", file=sys.stderr)
+                if self.is_running:
+                    print(f"[WARNING] Serial read error: {e}", file=sys.stderr)
                 time.sleep(0.5)
 
     def send_command(self, command: str) -> bool:

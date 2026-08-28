@@ -289,9 +289,9 @@ def main():
     cy = 0.07
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
-    ROI1 = [0, 175, 330, 265]   # Left Wall ROI
-    ROI2 = [330, 175, 640, 265]  # Right Wall ROI
-    ROI3 = [0, 95, 640, 255]    # Signal Pillars / Block Detection ROI (Fit to full screen width 0..640 & +10% height 95..255)
+    ROI1 = [20, 170, 240, 220]   # Left Wall ROI (Outer Left dedicated box)
+    ROI2 = [400, 170, 620, 220]  # Right Wall ROI (Outer Right dedicated box)
+    ROI3 = [0, 95, 640, 255]     # Signal Pillars / Block Detection ROI (Full Width 0..640)
     ROI4 = [200, 270, 440, 340]  # Ground Markers & Parking Lot ROI (Floor Lines)
 
     # Navigation flags & state counters
@@ -308,8 +308,8 @@ def main():
     # Dynamic Turn Exit Timings (Optimized for Narrow FOV Camera)
     minTurnDuration = 0.8  # Minimum arc turn time before checking wall re-acquisition (0.8s)
     maxTurnDuration = 2.2  # Safety maximum turn time cap (2.2s)
-    wallReacquireArea = 500 # Area threshold to confirm single wall in narrow FOV view
-    turnThresh = 200       # Area threshold below which wall end is detected
+    wallReacquireArea = 400 # Area threshold to confirm single wall in narrow FOV view
+    turnThresh = 150       # Area threshold below which wall end is detected
 
     tempParking = False
     parkingL = False
@@ -390,9 +390,9 @@ def main():
                     rev_steer = 65  # Red pillar is on Left -> Steer LEFT in reverse so front nose pulls RIGHT
                 elif green_pillar_area > 800:
                     rev_steer = 135 # Green pillar is on Right -> Steer RIGHT in reverse so front nose pulls LEFT
-                elif (0 < r_us <= 6) or (rightArea > 1300):
+                elif (0 < r_us <= 6) or (rightArea > 800):
                     rev_steer = 135 # Close to Right wall -> Steer RIGHT in reverse so nose pulls LEFT
-                elif (0 < l_us <= 6) or (leftArea > 1300):
+                elif (0 < l_us <= 6) or (leftArea > 800):
                     rev_steer = 65  # Close to Left wall -> Steer LEFT in reverse so nose pulls RIGHT
 
                 print("=" * 65)
@@ -563,26 +563,26 @@ def main():
                 # MODE B: PILLAR CLEARED / NO PILLAR -> PROVEN SAFE WALL CENTERING & CORNER APPROACH
                 # =========================================================================
                 else:
-                    both_walls_visible = (leftArea > 250 and rightArea > 250)
+                    both_walls_visible = (leftArea > 150 and rightArea > 150)
 
                     if both_walls_visible:
                         # Dual-wall proportional centering
                         navMode = "DUAL_WALL_CENTER"
                         aDiff = rightArea - leftArea
-                        angle = int(straightConst - (aDiff * 0.012))
-                    elif turnDir == "right" and rightArea <= 250:
+                        angle = int(straightConst - (aDiff * 0.015))
+                    elif turnDir == "right" and rightArea <= 150:
                         # Approaching RIGHT turn: Inner right wall dropped.
                         # Maintain straight course using outer left wall; DO NOT steer into outer wall!
                         navMode = "APPROACHING_RIGHT_CORNER"
-                        left_err = leftArea - 800
-                        angle = int(straightConst - (left_err * 0.008))
+                        left_err = leftArea - 600
+                        angle = int(straightConst - (left_err * 0.010))
                         angle = max(90, min(110, angle))
-                    elif turnDir == "left" and leftArea <= 250:
+                    elif turnDir == "left" and leftArea <= 150:
                         # Approaching LEFT turn: Inner left wall dropped.
                         # Maintain straight course using outer right wall; DO NOT steer into outer wall!
                         navMode = "APPROACHING_LEFT_CORNER"
-                        right_err = rightArea - 800
-                        angle = int(straightConst + (right_err * 0.008))
+                        right_err = rightArea - 600
+                        angle = int(straightConst + (right_err * 0.010))
                         angle = max(90, min(110, angle))
                     else:
                         navMode = "SIDE_US_WALLS"
@@ -594,7 +594,7 @@ def main():
                             angle = int(straightConst + (diff * 1.5))
                         else:
                             aDiff = rightArea - leftArea
-                            angle = int(straightConst - (aDiff * 0.006))
+                            angle = int(straightConst - (aDiff * 0.008))
 
                 # Constrain angle between safe mechanical limits (60 to 140 deg)
                 angle = max(60, min(140, angle))
