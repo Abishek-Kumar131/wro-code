@@ -144,15 +144,15 @@ class Pillar:
         self.h = h
 
 
-def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=380, endConst=15):
+def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=480, endConst=15):
     """Processes pillar contours and returns the nearest pillar candidate."""
     num_p = 0
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        # Check if area is large enough for the specific color pillar
-        if (area > 150 and colour == "red") or (area > 100 and colour == "red" and tempParking) or (area > 150 and colour == "green"):
-            if tempParking and colour == "green" and area < 250:
+        # Check if area is large enough for the specific color pillar (70 px for early lookahead)
+        if (area >= 70 and colour == "red") or (area >= 60 and colour == "red" and tempParking) or (area >= 70 and colour == "green"):
+            if tempParking and colour == "green" and area < 200:
                 continue
 
             approx = cv2.approxPolyDP(cnt, 0.01 * cv2.arcLength(cnt, True), True)
@@ -165,7 +165,7 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=38
             # Distance between pillar bottom and screen bottom-center (320, 480)
             temp_dist = round(math.dist([x, y], [320, 480]), 0)
 
-            if 120 < temp_dist < 400:
+            if 80 < temp_dist < 480:
                 num_p += 1
 
             # Only filter if it exceeds max tracking distance
@@ -187,7 +187,7 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=38
 def main():
     print("=" * 65)
     print("   ROBOVANGUARD - WRO Round 2 Obstacle Challenge Node (Pi 5)")
-    print("   Architecture: Permanent First-Color Lock + Anti-Drift Speed Control")
+    print("   Architecture: Early Lookahead + High-Grip Dynamic Evasion Speed")
     print("=" * 65)
 
     force_webcam = "--webcam" in sys.argv or "-w" in sys.argv
@@ -279,19 +279,20 @@ def main():
     sharpRight = 140   # Sharp right steering lock (140 deg)
     sharpLeft = 60     # Sharp left steering lock (60 deg)
 
-    # Speed Parameters (All speeds >= 235 PWM for powerful motor response)
-    normalSpeed = 245  # Full straightaway speed (245 PWM)
-    turnSpeed = 235    # High cornering & pillar avoidance speed (235 PWM)
+    # Speed Parameters (Tuned for maximum steering grip during obstacle evasion)
+    normalSpeed = 240  # Full open straightaway speed (240 PWM)
+    pillarSpeed = 195  # Dedicated High-Grip Evasion speed to avoid tire slip & ramming blocks (195 PWM)
+    turnSpeed = 230    # High cornering speed (230 PWM)
 
-    # PD Pillar Avoidance gains
-    cKp = 0.25
-    cKd = 0.22
-    cy = 0.07
+    # PD Pillar Avoidance gains (High responsiveness for early avoidance)
+    cKp = 0.32
+    cKd = 0.25
+    cy = 0.12
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
     ROI1 = [20, 170, 240, 220]   # Left Wall ROI (Outer Left dedicated box)
     ROI2 = [400, 170, 620, 220]  # Right Wall ROI (Outer Right dedicated box)
-    ROI3 = [0, 95, 640, 255]     # Signal Pillars / Block Detection ROI (Full Width 0..640)
+    ROI3 = [0, 60, 640, 280]     # Signal Pillars / Block Detection ROI (Early Horizon Y=60 for 1.5m lookahead)
     ROI4 = [200, 270, 440, 340]  # Ground Markers & Parking Lot ROI (Floor Lines)
 
     # Navigation flags & state counters
@@ -322,7 +323,7 @@ def main():
     error = 0
     prevError = 0
     endConst = 20
-    maxDist = 380
+    maxDist = 480
 
     # Pillar evasion persistence state (prevents premature evasion drop / rear wheel clipping)
     pillar_evade_until = 0.0
@@ -348,8 +349,8 @@ def main():
             # Extract contours using strict separation logic
             contours_left = find_black_wall_contours(img, ROI1)
             contours_right = find_black_wall_contours(img, ROI2)
-            contours_red = find_red_pillar_contours(img, ROI3)         # Strict Red Pillar + Aspect Ratio filter (H/W >= 0.75)
-            contours_green = find_green_pillar_contours(img, ROI3)     # Strict Green Pillar + Aspect Ratio filter (H/W >= 0.70)
+            contours_red = find_red_pillar_contours(img, ROI3)         # Strict Red Pillar + Aspect Ratio filter (H/W >= 0.65)
+            contours_green = find_green_pillar_contours(img, ROI3)     # Strict Green Pillar + Aspect Ratio filter (H/W >= 0.60)
             contours_orange = find_orange_line_contours(img, ROI4)      # Strict Orange Line (Floor ROI4)
             contours_blue = find_blue_line_contours(img, ROI4)          # Strict Blue Line (Floor ROI4)
             contours_magenta = find_contours(img_lab, rMagenta, ROI4)
@@ -474,7 +475,7 @@ def main():
                 # HARDWARE SERVO: 60 = LEFT turn, 140 = RIGHT turn!
                 targetTurnAngle = 60 if turnDir == "left" else 140
                 
-                # Stream active corner turn at turnSpeed (235) to prevent drifting!
+                # Stream active corner turn at turnSpeed (230) to prevent drifting!
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
@@ -517,20 +518,20 @@ def main():
                     lineLockoutUntil = currTime + maxTurnDuration + 3.0
 
             # -------------------------------------------------------------
-            # 3. STRAIGHTAWAY OBSTACLE AVOIDANCE & DYNAMIC ANTI-DRIFT SPEED CONTROL
+            # 3. STRAIGHTAWAY OBSTACLE AVOIDANCE & HIGH-GRIP EVASION SPEED
             # -------------------------------------------------------------
             if not isTurning and not tempParking:
-                # Nearest Pillar Tracking
+                # Nearest Pillar Tracking (480px lookahead horizon)
                 temp_p = Pillar(0, 1000000, 0, 0, greenTarget)
                 cPillar, num_pillars_g = find_pillar(contours_green, greenTarget, temp_p, "green", ROI3, tempParking, maxDist, endConst)
                 cPillar, num_pillars_r = find_pillar(contours_red, redTarget, cPillar, "red", ROI3, tempParking, maxDist, endConst)
 
                 if num_pillars_g >= 2 or num_pillars_r >= 2:
                     endConst = 40
-                    cKp, cKd, cy = 0.22, 0.20, 0.05
+                    cKp, cKd, cy = 0.30, 0.22, 0.10
                 else:
                     endConst = 20
-                    cKp, cKd, cy = 0.25, 0.22, 0.07
+                    cKp, cKd, cy = 0.32, 0.25, 0.12
 
                 # =========================================================================
                 # MODE A: PILLAR VISIBLE OR IN EVASION CLEARANCE WINDOW (100% PURE PILLAR AVOIDANCE)
@@ -538,7 +539,7 @@ def main():
                 if (cPillar.area > 0 or (currTime < pillar_evade_until and last_evade_pillar_target is not None)) and not tempParking:
                     if cPillar.area > 0:
                         last_evade_pillar_target = cPillar.target
-                        pillar_evade_until = currTime + 0.35  # Hold evasion heading for 350ms to clear rear wheels
+                        pillar_evade_until = currTime + 0.50  # Hold evasion heading for 500ms to clear rear wheels
                         navMode = "RED_PILLAR" if cPillar.target == redTarget else "GREEN_PILLAR"
                         
                         # HARDWARE SERVO MAPPING: 60 = LEFT, 100 = CENTER, 140 = RIGHT
@@ -558,6 +559,9 @@ def main():
                         # Pillar just cleared view: maintain evasion heading to avoid clipping rear wheels
                         navMode = "EVADING_PILLAR"
                         angle = last_evade_steer
+
+                    # Dedicated high-grip speed during obstacle evasion
+                    currentSpeed = pillarSpeed
 
                 # =========================================================================
                 # MODE B: PILLAR CLEARED / NO PILLAR -> PROVEN SAFE WALL CENTERING & CORNER APPROACH
@@ -595,6 +599,9 @@ def main():
                         else:
                             aDiff = rightArea - leftArea
                             angle = int(straightConst - (aDiff * 0.008))
+
+                    # Full cruising speed on open straightaway
+                    currentSpeed = normalSpeed
 
                 # Constrain angle between safe mechanical limits (60 to 140 deg)
                 angle = max(60, min(140, angle))

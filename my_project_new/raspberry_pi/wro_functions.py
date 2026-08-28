@@ -152,11 +152,11 @@ def find_black_wall_contours(img_bgr, ROI, min_area=60):
     return [c for c in contours if cv2.contourArea(c) > min_area]
 
 
-def find_red_pillar_contours(img_bgr, ROI, min_area=120):
+def find_red_pillar_contours(img_bgr, ROI, min_area=70):
     """
     Strict Red Pillar segmentation (HSV H in [0..8] U [172..180], S >= 120, V >= 80)
-    with explicit Orange Hue exclusion AND Aspect Ratio filtering (H/W >= 0.75)
-    to guarantee 0% Red/Orange floor line overlap.
+    with explicit Orange Hue exclusion AND Aspect Ratio filtering (H/W >= 0.65)
+    to guarantee 0% Red/Orange floor line overlap and high-distance lookahead.
     """
     x1, y1, x2, y2 = ROI
     roi_bgr = img_bgr[y1:y2, x1:x2]
@@ -180,21 +180,20 @@ def find_red_pillar_contours(img_bgr, ROI, min_area=120):
     for cnt in contours:
         if cv2.contourArea(cnt) < min_area:
             continue
-        # Geometry Aspect Ratio Filter: Pillars are tall/square 3D blocks (H/W >= 0.75)
-        # Floor lines are wide horizontal stripes (H/W < 0.6)
+        # Geometry Aspect Ratio Filter: Pillars are tall/square 3D blocks (H/W >= 0.65)
         x, y, w, h = cv2.boundingRect(cnt)
         aspect_ratio = float(h) / max(1.0, float(w))
-        if aspect_ratio >= 0.75:
+        if aspect_ratio >= 0.65:
             valid_pillars.append(cnt)
 
     return valid_pillars
 
 
-def find_green_pillar_contours(img_bgr, ROI, min_area=120):
+def find_green_pillar_contours(img_bgr, ROI, min_area=70):
     """
     Strict Green Pillar segmentation (HSV H in [35..85], S >= 60, V >= 50)
-    with Aspect Ratio filtering (H/W >= 0.70) to guarantee real 3D pillar detection
-    and reject flat floor reflections.
+    with Aspect Ratio filtering (H/W >= 0.60) to guarantee real 3D pillar detection
+    at high distance down the track.
     """
     x1, y1, x2, y2 = ROI
     roi_bgr = img_bgr[y1:y2, x1:x2]
@@ -213,7 +212,7 @@ def find_green_pillar_contours(img_bgr, ROI, min_area=120):
             continue
         x, y, w, h = cv2.boundingRect(cnt)
         aspect_ratio = float(h) / max(1.0, float(w))
-        if aspect_ratio >= 0.70:
+        if aspect_ratio >= 0.60:
             valid_pillars.append(cnt)
 
     return valid_pillars
