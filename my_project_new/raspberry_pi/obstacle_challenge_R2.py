@@ -279,10 +279,10 @@ def main():
     sharpRight = 140   # Sharp right steering lock (140 deg)
     sharpLeft = 60     # Sharp left steering lock (60 deg)
 
-    # Speed Parameters (Tuned for maximum steering grip during obstacle evasion)
-    normalSpeed = 240  # Full open straightaway speed (240 PWM)
-    pillarSpeed = 195  # Dedicated High-Grip Evasion speed to avoid tire slip & ramming blocks (195 PWM)
-    turnSpeed = 230    # High cornering speed (230 PWM)
+    # Speed Parameters (All speeds >= 225 PWM for strong motor response without stalling)
+    normalSpeed = 245  # Full open straightaway speed (245 PWM)
+    pillarSpeed = 228  # High-torque evasion speed above 220 PWM (228 PWM)
+    turnSpeed = 235    # High cornering speed (235 PWM)
 
     # PD Pillar Avoidance gains (High responsiveness for early avoidance)
     cKp = 0.32
