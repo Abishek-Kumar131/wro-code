@@ -113,10 +113,12 @@ def morphology_clean(mask, ksize=5, iterations=1):
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=iterations)
 
 
-def find_black_wall_contours(img_bgr, ROI, min_area=60):
+def find_black_wall_contours(img_bgr, ROI, min_area=50):
     """
-    Robust Black Side-Wall Segmentation using Dual-Layer HSV + LAB thresholds
-    and explicit HSV Blue & Orange mask subtraction to guarantee 0% blue line overlap.
+    Robust Black Side-Wall Segmentation under ALL lighting conditions
+    (Cold LED, Warm Incandescent, Daylight, and Shadows).
+    Uses wide-dynamic LAB + HSV dual masks with explicit color subtraction
+    (Blue, Orange, Red, Green) to ensure solid black wall detection without floor line confusion.
     """
     x1, y1, x2, y2 = ROI
     roi_bgr = img_bgr[y1:y2, x1:x2]
@@ -124,29 +126,35 @@ def find_black_wall_contours(img_bgr, ROI, min_area=60):
     roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2Lab)
     roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
 
-    # 1. HSV Black Mask (V <= 65, S <= 110)
-    mask_hsv_black = cv2.inRange(roi_hsv, np.array([0, 0, 0]), np.array([180, 110, 65]))
+    # 1. HSV Black Mask with warm-light tolerance (V <= 85, S <= 140)
+    mask_hsv_black = cv2.inRange(roi_hsv, np.array([0, 0, 0]), np.array([180, 140, 85]))
 
-    # 2. LAB Black Mask (L <= 65, A in [105, 150], B in [112, 145])
-    mask_lab_black = cv2.inRange(roi_lab, np.array([0, 105, 112]), np.array([65, 150, 145]))
+    # 2. LAB Black Mask with warm-light shift tolerance (L <= 85, A in [95, 160], B in [95, 165])
+    mask_lab_black = cv2.inRange(roi_lab, np.array([0, 95, 95]), np.array([85, 160, 165]))
 
-    # Combine HSV Black & LAB Black with AND logic
-    mask = cv2.bitwise_and(mask_hsv_black, mask_lab_black)
+    # Combine with bitwise OR for maximum coverage across lighting shadows and warm highlights
+    mask = cv2.bitwise_or(mask_hsv_black, mask_lab_black)
 
-    # 3. Explicitly subtract ALL Blue pixels (HSV Blue: H in 80..140, S >= 35)
-    blue_hsv_mask = cv2.inRange(roi_hsv, np.array([80, 35, 35]), np.array([140, 255, 255]))
+    # 3. Explicitly subtract saturated Blue lines (HSV Blue: H in 85..135, S >= 60, V >= 40)
+    blue_mask = cv2.inRange(roi_hsv, np.array([85, 60, 40]), np.array([135, 255, 255]))
 
-    # 4. Explicitly subtract ALL Orange pixels (HSV Orange: H in 5..35, S >= 40)
-    orange_hsv_mask = cv2.inRange(roi_hsv, np.array([5, 40, 40]), np.array([35, 255, 255]))
+    # 4. Explicitly subtract saturated Orange lines (HSV Orange: H in 8..30, S >= 90, V >= 80)
+    orange_mask = cv2.inRange(roi_hsv, np.array([8, 90, 80]), np.array([30, 255, 255]))
 
-    # Subtract Blue and Orange masks completely
-    mask = cv2.bitwise_and(mask, cv2.bitwise_not(blue_hsv_mask))
-    mask = cv2.bitwise_and(mask, cv2.bitwise_not(orange_hsv_mask))
+    # 5. Explicitly subtract saturated Red/Green pillars if visible inside wall ROI
+    red_mask1 = cv2.inRange(roi_hsv, np.array([0, 130, 70]), np.array([8, 255, 255]))
+    red_mask2 = cv2.inRange(roi_hsv, np.array([172, 130, 70]), np.array([180, 255, 255]))
+    green_mask = cv2.inRange(roi_hsv, np.array([35, 80, 50]), np.array([85, 255, 255]))
 
-    # Apply MORPH_CLOSE & GaussianBlur to clean edges
+    # Subtract all colored objects from black wall mask
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(blue_mask))
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(orange_mask))
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(cv2.bitwise_or(red_mask1, red_mask2)))
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(green_mask))
+
+    # Apply MORPH_CLOSE to seal solid black wall contours
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.GaussianBlur(mask, (5, 5), 0)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return [c for c in contours if cv2.contourArea(c) > min_area]

@@ -371,7 +371,7 @@ def main():
             b_us = us_data.get("b", 0)
 
             # -------------------------------------------------------------
-            # 0. EMERGENCY ANGLED REVERSE FOR CLOSE OBSTACLE BLOCKS & WALL COLLISIONS
+            # 0. EMERGENCY ANGLED REVERSE (Gentle Track-Aligned Backoff)
             # -------------------------------------------------------------
             red_pillar_area = max_contour(contours_red, ROI3)[0]
             green_pillar_area = max_contour(contours_green, ROI3)[0]
@@ -385,20 +385,15 @@ def main():
             if (has_close_us or (side_wall_jam and close_visual_pillar)) and not isTurning and currTime >= reverseCooldownUntil:
                 min_close = min(front_sensors) if front_sensors else 0
 
-                # Determine dynamic reverse steering angle to pull away from the obstacle:
+                # Gentle reverse alignment (stays strictly down the corridor, no 180° disorientation!)
                 rev_steer = 100
-                if red_pillar_area > 800:
-                    rev_steer = 65  # Red pillar is on Left -> Steer LEFT in reverse so front nose pulls RIGHT
-                elif green_pillar_area > 800:
-                    rev_steer = 135 # Green pillar is on Right -> Steer RIGHT in reverse so front nose pulls LEFT
-                elif (0 < r_us <= 6) or (rightArea > 800):
-                    rev_steer = 135 # Close to Right wall -> Steer RIGHT in reverse so nose pulls LEFT
-                elif (0 < l_us <= 6) or (leftArea > 800):
-                    rev_steer = 65  # Close to Left wall -> Steer LEFT in reverse so nose pulls RIGHT
+                if red_pillar_area > 800 or (0 < l_us <= 6) or (leftArea > 800):
+                    rev_steer = 92  # Obstacle on Left -> Back up straight with gentle 8° right-nose bias
+                elif green_pillar_area > 800 or (0 < r_us <= 6) or (rightArea > 800):
+                    rev_steer = 108 # Obstacle on Right -> Back up straight with gentle 8° left-nose bias
 
                 print("=" * 65)
-                print(f"[EMERGENCY REVERSE] Collision hazard detected (US: {min_close} cm | Rev Steer: {rev_steer}°)")
-                print(f"[EMERGENCY REVERSE] Reversing at angle {rev_steer}° to free nose...")
+                print(f"[EMERGENCY REVERSE] Proximity limit (US: {min_close} cm) -> Backing straight (Angle: {rev_steer}°)...")
                 print("=" * 65)
 
                 rev_start = time.time()
@@ -419,24 +414,25 @@ def main():
                     rev_elapsed = time.time() - rev_start
 
                     if 0 < curr_b <= 8:
-                        print(f"[SAFETY] Rear wall proximity ({curr_b}cm)! Stopping reverse.")
+                        print(f"[SAFETY] Rear wall buffer reached ({curr_b}cm)! Stopping reverse.")
                         break
 
-                    front_cleared = (curr_f >= 20 or curr_f == 0) and \
-                                    (curr_f1 >= 20 or curr_f1 == 0) and \
-                                    (curr_f2 >= 20 or curr_f2 == 0)
+                    front_cleared = (curr_f >= 18 or curr_f == 0) and \
+                                    (curr_f1 >= 18 or curr_f1 == 0) and \
+                                    (curr_f2 >= 18 or curr_f2 == 0)
 
-                    if rev_elapsed >= 0.45 and front_cleared:
+                    if rev_elapsed >= 0.35 and front_cleared:
                         break
-                    if rev_elapsed >= 1.0: # Safety cap
+                    if rev_elapsed >= 0.70: # Crisp, short safety cap
                         break
 
                 serial_ctrl.send_command("STOP")
-                time.sleep(0.06)
-                serial_ctrl.send_command("FORWARD")
+                time.sleep(0.04)
+                serial_ctrl.send_command(f"DRIVE:{pillarSpeed}:100") # Immediately drive straight forward
                 reverseCooldownUntil = time.time() + 1.2 # 1.2s cooldown
                 last_cmd_time = time.time()
-                last_drive_speed = turnSpeed
+                last_drive_speed = pillarSpeed
+                last_steer_angle = 100
 
             # -------------------------------------------------------------
             # 1. PERMANENT FIRST-COLOR DIRECTION LOCK & MARKER DETECTION
@@ -475,7 +471,7 @@ def main():
                 # HARDWARE SERVO: 60 = LEFT turn, 140 = RIGHT turn!
                 targetTurnAngle = 60 if turnDir == "left" else 140
                 
-                # Stream active corner turn at turnSpeed (230) to prevent drifting!
+                # Stream active corner turn at turnSpeed (235) to prevent drifting!
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
@@ -518,7 +514,7 @@ def main():
                     lineLockoutUntil = currTime + maxTurnDuration + 3.0
 
             # -------------------------------------------------------------
-            # 3. STRAIGHTAWAY OBSTACLE AVOIDANCE & HIGH-GRIP EVASION SPEED
+            # 3. STRAIGHTAWAY OBSTACLE AVOIDANCE & POST-PILLAR CORRIDOR GUARD
             # -------------------------------------------------------------
             if not isTurning and not tempParking:
                 # Nearest Pillar Tracking (480px lookahead horizon)
@@ -531,7 +527,7 @@ def main():
                     cKp, cKd, cy = 0.30, 0.22, 0.10
                 else:
                     endConst = 20
-                    cKp, cKd, cy = 0.32, 0.25, 0.12
+                    cKp, cKd, cy = 0.34, 0.26, 0.14
 
                 # =========================================================================
                 # MODE A: PILLAR VISIBLE OR IN EVASION CLEARANCE WINDOW (100% PURE PILLAR AVOIDANCE)
@@ -539,7 +535,7 @@ def main():
                 if (cPillar.area > 0 or (currTime < pillar_evade_until and last_evade_pillar_target is not None)) and not tempParking:
                     if cPillar.area > 0:
                         last_evade_pillar_target = cPillar.target
-                        pillar_evade_until = currTime + 0.50  # Hold evasion heading for 500ms to clear rear wheels
+                        pillar_evade_until = currTime + 0.70  # Hold evasion heading for 700ms so chassis & rear wheels cleanly pass
                         navMode = "RED_PILLAR" if cPillar.target == redTarget else "GREEN_PILLAR"
                         
                         # HARDWARE SERVO MAPPING: 60 = LEFT, 100 = CENTER, 140 = RIGHT
@@ -553,41 +549,53 @@ def main():
                             y_offset = int(cy * (cPillar.y - ROI3[1]))
                             angle += (y_offset if error <= 0 else -y_offset)
 
+                        # Side Wall Proximity Safety Guard while dodging:
+                        # If evading Red (shifted Right) and getting too close to Right Wall (r_us < 12), pull back towards center
+                        if cPillar.target == redTarget and 0 < r_us <= 12:
+                            angle = min(120, angle)
+                        # If evading Green (shifted Left) and getting too close to Left Wall (l_us < 12), pull back towards center
+                        elif cPillar.target == greenTarget and 0 < l_us <= 12:
+                            angle = max(80, angle)
+
                         prevError = error
                         last_evade_steer = angle
                     else:
-                        # Pillar just cleared view: maintain evasion heading to avoid clipping rear wheels
+                        # Pillar just cleared front view: maintain parallel corridor heading so rear wheels don't swipe the block!
                         navMode = "EVADING_PILLAR"
-                        angle = last_evade_steer
+                        # Straighten out slightly to track parallel through the gap without hitting wall or pillar
+                        if last_evade_pillar_target == redTarget:
+                            angle = max(100, min(115, last_evade_steer))
+                        else:
+                            angle = min(100, max(85, last_evade_steer))
 
                     # Dedicated high-grip speed during obstacle evasion
                     currentSpeed = pillarSpeed
 
                 # =========================================================================
-                # MODE B: PILLAR CLEARED / NO PILLAR -> PROVEN SAFE WALL CENTERING & CORNER APPROACH
+                # MODE B: PILLAR CLEARED -> PROVEN SAFE WALL CENTERING & CORNER APPROACH
                 # =========================================================================
                 else:
-                    both_walls_visible = (leftArea > 150 and rightArea > 150)
+                    both_walls_visible = (leftArea > 120 and rightArea > 120)
 
                     if both_walls_visible:
                         # Dual-wall proportional centering
                         navMode = "DUAL_WALL_CENTER"
                         aDiff = rightArea - leftArea
-                        angle = int(straightConst - (aDiff * 0.015))
-                    elif turnDir == "right" and rightArea <= 150:
+                        angle = int(straightConst - (aDiff * 0.012))
+                    elif turnDir == "right" and rightArea <= 120:
                         # Approaching RIGHT turn: Inner right wall dropped.
                         # Maintain straight course using outer left wall; DO NOT steer into outer wall!
                         navMode = "APPROACHING_RIGHT_CORNER"
                         left_err = leftArea - 600
-                        angle = int(straightConst - (left_err * 0.010))
-                        angle = max(90, min(110, angle))
-                    elif turnDir == "left" and leftArea <= 150:
+                        angle = int(straightConst - (left_err * 0.008))
+                        angle = max(92, min(108, angle))
+                    elif turnDir == "left" and leftArea <= 120:
                         # Approaching LEFT turn: Inner left wall dropped.
                         # Maintain straight course using outer right wall; DO NOT steer into outer wall!
                         navMode = "APPROACHING_LEFT_CORNER"
                         right_err = rightArea - 600
-                        angle = int(straightConst + (right_err * 0.010))
-                        angle = max(90, min(110, angle))
+                        angle = int(straightConst + (right_err * 0.008))
+                        angle = max(92, min(108, angle))
                     else:
                         navMode = "SIDE_US_WALLS"
                         valid_left = (5 < l_us < 80)
@@ -598,18 +606,13 @@ def main():
                             angle = int(straightConst + (diff * 1.5))
                         else:
                             aDiff = rightArea - leftArea
-                            angle = int(straightConst - (aDiff * 0.008))
+                            angle = int(straightConst - (aDiff * 0.006))
 
                     # Full cruising speed on open straightaway
                     currentSpeed = normalSpeed
 
                 # Constrain angle between safe mechanical limits (60 to 140 deg)
                 angle = max(60, min(140, angle))
-
-                # DYNAMIC ANTI-DRIFT SPEED CONTROL:
-                # When steer angle deflection > 30° (angle < 70 or angle > 130), reduce speed to turnSpeed!
-                steerDeflection = abs(angle - 100)
-                currentSpeed = turnSpeed if steerDeflection > 30 else normalSpeed
 
                 # Rate-limiting: Send DRIVE command only when angle/speed changes or every 100ms
                 angle_changed = last_steer_angle is None or abs(angle - last_steer_angle) >= 2
