@@ -28,8 +28,8 @@ import numpy as np
 from wro_serial import WROSerialController
 from masks import rMagenta, rRed, rGreen, rBlue, rOrange, rBlack, lotType
 from wro_functions import (CameraManager, find_black_wall_contours, find_red_pillar_contours,
-                           find_orange_line_contours, find_contours, max_contour, draw_roi,
-                           draw_offset_contours, display_variables)
+                           find_green_pillar_contours, find_orange_line_contours, find_contours,
+                           max_contour, draw_roi, draw_offset_contours, display_variables)
 
 
 def wait_for_button_press(gpio_pin=17, show_display=False, window_name="", camera=None, active_high=False):
@@ -144,15 +144,15 @@ class Pillar:
         self.h = h
 
 
-def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=370, endConst=30):
-    """Processes pillar contours and returns the nearest pillar candidate matching ObstacleChallengeV2 logic."""
+def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=380, endConst=15):
+    """Processes pillar contours and returns the nearest pillar candidate."""
     num_p = 0
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
         # Check if area is large enough for the specific color pillar
-        if (area > 150 and colour == "red") or (area > 100 and colour == "red" and tempParking) or (area > 200 and colour == "green"):
-            if tempParking and colour == "green" and area < 300:
+        if (area > 150 and colour == "red") or (area > 100 and colour == "red" and tempParking) or (area > 150 and colour == "green"):
+            if tempParking and colour == "green" and area < 250:
                 continue
 
             approx = cv2.approxPolyDP(cnt, 0.01 * cv2.arcLength(cnt, True), True)
@@ -165,11 +165,11 @@ def find_pillar(contours, target, p, colour, ROI3, tempParking=False, maxDist=37
             # Distance between pillar bottom and screen bottom-center (320, 480)
             temp_dist = round(math.dist([x, y], [320, 480]), 0)
 
-            if 160 < temp_dist < 380:
+            if 120 < temp_dist < 400:
                 num_p += 1
 
-            # Skip pillar if it gets too close to bottom ROI or exceeds max distance
-            if y > ROI3[3] - endConst or temp_dist > maxDist:
+            # Only filter if it exceeds max tracking distance
+            if temp_dist > maxDist:
                 continue
 
             # Update if this pillar is closer than previous candidate
@@ -271,8 +271,8 @@ def main():
     # ------------------------------------------------------------------------
     # Obstacle & Steering Parameters
     # ------------------------------------------------------------------------
-    redTarget = 110    # Target X position for Red Pillars (Keep on LEFT)
-    greenTarget = 530  # Target X position for Green Pillars (Keep on RIGHT)
+    redTarget = 110    # Target X position for Red Pillars (Keep on LEFT -> Steers RIGHT towards 60)
+    greenTarget = 530  # Target X position for Green Pillars (Keep on RIGHT -> Steers LEFT towards 140)
 
     straightConst = 100 # Steering center (100 degrees)
     sharpRight = 60    # Sharp right steering lock
@@ -288,8 +288,8 @@ def main():
 
     # PD Pillar Avoidance gains
     cKp = 0.25
-    cKd = 0.25
-    cy = 0.08
+    cKd = 0.22
+    cy = 0.07
 
     # Regions of Interest (ROI) [x1, y1, x2, y2]
     ROI1 = [0, 175, 330, 265]   # Left Wall ROI
@@ -324,8 +324,13 @@ def main():
     prevDiff = 0
     error = 0
     prevError = 0
-    endConst = 30
-    maxDist = 370
+    endConst = 20
+    maxDist = 380
+
+    # Pillar evasion persistence state (prevents premature evasion drop / rear wheel clipping)
+    pillar_evade_until = 0.0
+    last_evade_steer = straightConst
+    last_evade_pillar_target = None
 
     # Rate-limiting variables
     last_steer_angle = None
@@ -340,14 +345,15 @@ def main():
                 continue
 
             currTime = time.time()
+            navMode = "STRAIGHT"  # Scope-safe default for telemetry
             img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
 
             # Extract contours using strict separation logic
             contours_left = find_black_wall_contours(img, ROI1)
             contours_right = find_black_wall_contours(img, ROI2)
-            contours_red = find_red_pillar_contours(img, ROI3)       # Strict Red Pillar + Aspect Ratio filter (H/W >= 0.75)
-            contours_green = find_contours(img_lab, rGreen, ROI3)
-            contours_orange = find_orange_line_contours(img, ROI4)    # Strict Orange Line (Floor ROI4: Y in 260..330)
+            contours_red = find_red_pillar_contours(img, ROI3)         # Strict Red Pillar + Aspect Ratio filter (H/W >= 0.75)
+            contours_green = find_green_pillar_contours(img, ROI3)     # Strict Green Pillar + Aspect Ratio filter (H/W >= 0.70)
+            contours_orange = find_orange_line_contours(img, ROI4)      # Strict Orange Line (Floor ROI4: Y in 260..330)
             contours_blue = find_contours(img_lab, rBlue, ROI4)
             contours_magenta = find_contours(img_lab, rMagenta, ROI4)
 
@@ -371,40 +377,46 @@ def main():
             # -------------------------------------------------------------
             red_pillar_area = max_contour(contours_red, ROI3)[0]
             green_pillar_area = max_contour(contours_green, ROI3)[0]
-            close_visual_pillar = (red_pillar_area > 1200 or green_pillar_area > 1200)
+            close_visual_pillar = (red_pillar_area > 2000 or green_pillar_area > 2000)
 
+            # Strictly require positive distance (0 is open-air measurement timeout, NOT a crash!)
             front_sensors = [v for v in (f_us, f1_us, f2_us) if 0 < v <= 12]
             has_close_us = len(front_sensors) > 0
-            bumper_touch = (f_us == 0 or f1_us == 0 or f2_us == 0) and (close_visual_pillar or leftArea > 1400 or rightArea > 1400)
-            side_wall_jam = (0 < l_us <= 6) or (0 < r_us <= 6)
+            side_wall_jam = (0 < l_us <= 5) or (0 < r_us <= 5)
 
-            if (has_close_us or bumper_touch or side_wall_jam) and not isTurning and currTime >= reverseCooldownUntil:
+            if (has_close_us or (side_wall_jam and close_visual_pillar)) and not isTurning and currTime >= reverseCooldownUntil:
                 min_close = min(front_sensors) if front_sensors else 0
 
                 # Determine dynamic reverse steering angle to angle nose toward open passage:
                 rev_steer = 100
                 if red_pillar_area > 800:
-                    rev_steer = 135 # Steer RIGHT while reversing to angle nose away from RED pillar on left
+                    rev_steer = 135 # Steer RIGHT in reverse to pull nose away from RED pillar on left
                 elif green_pillar_area > 800:
-                    rev_steer = 65  # Steer LEFT while reversing to angle nose away from GREEN pillar on right
-                elif (0 < r_us <= 6) or (0 < f2_us <= 11 and rightArea > leftArea) or (rightArea > 1300):
-                    rev_steer = 65  # Steer LEFT in reverse -> pulls nose away from close right/inner wall
-                elif (0 < l_us <= 6) or (0 < f1_us <= 11 and leftArea > rightArea) or (leftArea > 1300):
-                    rev_steer = 135 # Steer RIGHT in reverse -> pulls nose away from close left/inner wall
+                    rev_steer = 65  # Steer LEFT in reverse to pull nose away from GREEN pillar on right
+                elif (0 < r_us <= 6) or (rightArea > 1300):
+                    rev_steer = 65  # Steer LEFT in reverse -> pulls nose away from close right wall
+                elif (0 < l_us <= 6) or (leftArea > 1300):
+                    rev_steer = 135 # Steer RIGHT in reverse -> pulls nose away from close left wall
                 elif leftArea > rightArea:
                     rev_steer = 130 # Angle away from close left wall
                 elif rightArea > leftArea:
                     rev_steer = 70  # Angle away from close right wall
 
                 print("=" * 65)
-                print(f"[EMERGENCY REVERSE] Squeeze obstacle / wall detected! (US: {min_close} cm | Rev Steer: {rev_steer}°)")
+                print(f"[EMERGENCY REVERSE] Collision hazard detected (US: {min_close} cm | Rev Steer: {rev_steer}°)")
                 print(f"[EMERGENCY REVERSE] Reversing at angle {rev_steer}° to align nose into open passage...")
                 print("=" * 65)
 
                 rev_start = time.time()
                 while True:
                     serial_ctrl.send_command(f"DRIVE:-235:{rev_steer}")
-                    time.sleep(0.05)
+                    time.sleep(0.04)
+
+                    # Pump camera frames to prevent V4L2 kernel buffer queue stalls
+                    _ = camera.capture_array()
+                    if show_monitor_display:
+                        cv2.waitKey(1)
+
                     us_check = serial_ctrl.get_us_data()
                     curr_f = us_check.get("f", 0)
                     curr_f1 = us_check.get("f1", curr_f)
@@ -413,7 +425,7 @@ def main():
 
                     rev_elapsed = time.time() - rev_start
 
-                    if curr_b > 0 and curr_b <= 8:
+                    if 0 < curr_b <= 8:
                         print(f"[SAFETY] Rear wall proximity ({curr_b}cm)! Stopping reverse.")
                         break
 
@@ -427,7 +439,7 @@ def main():
                         break
 
                 serial_ctrl.send_command("STOP")
-                time.sleep(0.08)
+                time.sleep(0.06)
                 serial_ctrl.send_command("FORWARD")
                 reverseCooldownUntil = time.time() + 1.2 # 1.2s cooldown so bot can pass cleanly through gap!
                 last_cmd_time = time.time()
@@ -468,7 +480,7 @@ def main():
                 # FIX: 60 deg is LEFT turn, 140 deg is RIGHT turn!
                 targetTurnAngle = 60 if turnDir == "left" else 140
                 
-                # Stream active corner turn at reduced speed (195) to prevent drifting!
+                # Stream active corner turn at turnSpeed (235) to prevent drifting!
                 if (currTime - last_cmd_time) >= 0.1 or last_drive_speed != turnSpeed:
                     serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{targetTurnAngle}")
                     last_cmd_time = currTime
@@ -520,33 +532,43 @@ def main():
 
                 # Dynamically adjust PD gains based on pillar density
                 if num_pillars_g >= 2 or num_pillars_r >= 2:
-                    endConst = 60
-                    cKp, cKd, cy = 0.20, 0.20, 0.05
+                    endConst = 40
+                    cKp, cKd, cy = 0.22, 0.20, 0.05
                 else:
-                    endConst = 30
-                    cKp, cKd, cy = 0.25, 0.25, 0.08
+                    endConst = 20
+                    cKp, cKd, cy = 0.25, 0.22, 0.07
 
                 # =========================================================================
-                # MODE A: PILLAR VISIBLE -> 100% PURE PILLAR AVOIDANCE (ZERO WALL INTERFERENCE)
+                # MODE A: PILLAR VISIBLE OR IN EVASION CLEARANCE WINDOW (100% PURE PILLAR AVOIDANCE)
                 # =========================================================================
-                if cPillar.area > 0 and not parkingR and not parkingL:
-                    navMode = "RED_PILLAR" if cPillar.target == redTarget else "GREEN_PILLAR"
-                    
-                    # Calculate X error relative to target position
-                    error = cPillar.target - cPillar.x
-                    angle = int(straightConst - (error * cKp) - ((error - prevError) * cKd))
+                if (cPillar.area > 0 or (currTime < pillar_evade_until and last_evade_pillar_target is not None)) and not tempParking:
+                    if cPillar.area > 0:
+                        last_evade_pillar_target = cPillar.target
+                        pillar_evade_until = currTime + 0.35  # Hold evasion heading for 350ms to clear rear wheels
+                        navMode = "RED_PILLAR" if cPillar.target == redTarget else "GREEN_PILLAR"
+                        
+                        # CORRECTED PD STEERING FORMULA (Sign Fix: + instead of -):
+                        # Red target = 110 (error < 0 -> steers RIGHT towards 60)
+                        # Green target = 530 (error > 0 -> steers LEFT towards 140)
+                        error = cPillar.target - cPillar.x
+                        angle = int(straightConst + (error * cKp) + ((error - prevError) * cKd))
 
-                    # Adjust angle further based on vertical proximity (cy scaling)
-                    if not tempParking:
-                        y_offset = int(cy * (cPillar.y - ROI3[1]))
-                        angle -= y_offset if error <= 0 else -y_offset
+                        # Vertical proximity scaling (Pulls harder towards evasion side as obstacle gets closer)
+                        if not tempParking:
+                            y_offset = int(cy * (cPillar.y - ROI3[1]))
+                            angle += (y_offset if error > 0 else -y_offset)
 
-                    prevError = error
+                        prevError = error
+                        last_evade_steer = angle
+                    else:
+                        # Pillar just cleared view: maintain evasion heading to avoid clipping rear wheels
+                        navMode = "EVADING_PILLAR"
+                        angle = last_evade_steer
 
                 # =========================================================================
                 # MODE B: PILLAR CLEARED / NO PILLAR -> USE SIDE ULTRASONICS (L & R) TO STEER AWAY FROM WALLS
                 # =========================================================================
-                elif not parkingL and not parkingR:
+                elif not tempParking:
                     navMode = "SIDE_US_WALLS"
                     valid_left = (5 < l_us < 120)
                     valid_right = (5 < r_us < 120)
@@ -568,20 +590,11 @@ def main():
                         aDiff = rightArea - leftArea
                         angle = int(straightConst - (aDiff * 0.005))
 
-                # Emergency Reversing Safety Check (Blocked directly by pillar)
-                if ((cPillar.area > 6500 and cPillar.target == redTarget) or 
-                    (cPillar.area > 8000 and cPillar.target == greenTarget)) and cPillar.y > 350 and not tempParking:
-                    print("[SAFETY] Dangerously close to pillar! Executing emergency reverse...")
-                    serial_ctrl.send_command("BACKWARD")
-                    time.sleep(0.6)
-                    serial_ctrl.send_command("FORWARD")
-                    continue
-
                 # Constrain angle between safe mechanical limits (60 to 140 deg)
                 angle = max(60, min(140, angle))
 
                 # DYNAMIC ANTI-DRIFT SPEED CONTROL:
-                # When steer angle deflection > 30° (angle < 70 or angle > 130), reduce speed to 195!
+                # When steer angle deflection > 30° (angle < 70 or angle > 130), reduce speed to turnSpeed!
                 steerDeflection = abs(angle - 100)
                 currentSpeed = turnSpeed if steerDeflection > 30 else normalSpeed
 
@@ -604,14 +617,34 @@ def main():
                 tempParking = True
 
             if tempParking and not isTurning:
-                if magentaArea > 3000:
+                if magentaArea > 2500:
                     navMode = "PARKING_LOT"
-                    print("[PARKING] Entering Magenta Parking Lot!")
-                    angle = sharpLeft if turnDir == "left" else sharpRight
-                    serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{angle}")
-                    time.sleep(1.2)
+                    # Centroid of magenta contour to determine left vs right parking bay
+                    magenta_max = max_contour(contours_magenta, ROI4)
+                    mag_x = magenta_max[1]
+                    midpoint = ROI4[0] + (ROI4[2] - ROI4[0]) // 2
+                    park_angle = sharpLeft if mag_x < midpoint else sharpRight
+
+                    print(f"[PARKING] Magenta Lot Detected (Area: {magentaArea}, X: {mag_x}) -> Steering {'LEFT' if park_angle == sharpLeft else 'RIGHT'}...")
+                    
+                    park_start = time.time()
+                    while time.time() - park_start < 2.0:
+                        serial_ctrl.send_command(f"DRIVE:{turnSpeed}:{park_angle}")
+                        time.sleep(0.04)
+
+                        # Check front proximity to stop cleanly before touching rear barrier
+                        us_check = serial_ctrl.get_us_data()
+                        front_dist = us_check.get("f", 0)
+                        if 0 < front_dist <= 15:
+                            print(f"[PARKING] Reached parking end barrier ({front_dist} cm)!")
+                            break
+
+                    # Active electronic brake sequence
                     serial_ctrl.send_command("STOP")
-                    print("[FINISH] Obstacle Challenge Complete!")
+                    serial_ctrl.send_command("DRIVE:-180:100")
+                    time.sleep(0.08)
+                    serial_ctrl.send_command("STOP")
+                    print("[FINISH] Obstacle Challenge Parking Complete! Bot Safely Parked.")
                     break
 
             # Draw ROIs & Offset Contours (matching open_challenge_R1.py)

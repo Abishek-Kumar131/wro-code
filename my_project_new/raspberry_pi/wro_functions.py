@@ -190,6 +190,35 @@ def find_red_pillar_contours(img_bgr, ROI, min_area=120):
     return valid_pillars
 
 
+def find_green_pillar_contours(img_bgr, ROI, min_area=120):
+    """
+    Strict Green Pillar segmentation (HSV H in [35..85], S >= 60, V >= 50)
+    with Aspect Ratio filtering (H/W >= 0.70) to guarantee real 3D pillar detection
+    and reject flat floor reflections.
+    """
+    x1, y1, x2, y2 = ROI
+    roi_bgr = img_bgr[y1:y2, x1:x2]
+    roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+
+    green_mask = cv2.inRange(roi_hsv, np.array([35, 60, 50]), np.array([85, 255, 255]))
+
+    kernel = np.ones((5, 5), np.uint8)
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    valid_pillars = []
+    for cnt in contours:
+        if cv2.contourArea(cnt) < min_area:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        aspect_ratio = float(h) / max(1.0, float(w))
+        if aspect_ratio >= 0.70:
+            valid_pillars.append(cnt)
+
+    return valid_pillars
+
+
 def find_orange_line_contours(img_bgr, ROI, min_area=100):
     """
     Robust Dual-Layer HSV + LAB Orange Line segmentation.
