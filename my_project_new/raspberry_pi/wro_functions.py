@@ -247,6 +247,29 @@ def find_orange_line_contours(img_bgr, ROI, min_area=100):
     return [c for c in contours if cv2.contourArea(c) > min_area]
 
 
+def find_blue_line_contours(img_bgr, ROI, min_area=100):
+    """
+    Robust Dual-Layer HSV + LAB Blue Line segmentation.
+    Enforces pure blue hue [100..130] & Saturation >= 80 to prevent black wall or
+    floor shadow confusion.
+    """
+    x1, y1, x2, y2 = ROI
+    roi_bgr = img_bgr[y1:y2, x1:x2]
+    roi_hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2Lab)
+
+    hsv_blue = cv2.inRange(roi_hsv, np.array([100, 80, 50]), np.array([135, 255, 255]))
+    lab_blue = cv2.inRange(roi_lab, np.array([20, 110, 0]), np.array([255, 170, 115]))
+
+    blue_mask = cv2.bitwise_and(hsv_blue, lab_blue)
+    kernel = np.ones((5, 5), np.uint8)
+    blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_CLOSE, kernel)
+    blue_mask = cv2.GaussianBlur(blue_mask, (5, 5), 0)
+
+    contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [c for c in contours if cv2.contourArea(c) > min_area]
+
+
 def find_contours(img_lab, lab_range, ROI, min_area=60):
     """Segment an ROI in CIELAB color space, apply Gaussian blur & MORPH_CLOSE, returning filtered contours."""
     x1, y1, x2, y2 = ROI
