@@ -516,7 +516,7 @@ def main():
             # -------------------------------------------------------------
             # 3. STRAIGHTAWAY OBSTACLE AVOIDANCE & POST-PILLAR CORRIDOR GUARD
             # -------------------------------------------------------------
-            if not isTurning and not tempParking:
+            if not isTurning:
                 # Nearest Pillar Tracking (480px lookahead horizon)
                 temp_p = Pillar(0, 1000000, 0, 0, greenTarget)
                 cPillar, num_pillars_g = find_pillar(contours_green, greenTarget, temp_p, "green", ROI3, tempParking, maxDist, endConst)
@@ -532,7 +532,7 @@ def main():
                 # =========================================================================
                 # MODE A: PILLAR VISIBLE OR IN EVASION CLEARANCE WINDOW (100% PURE PILLAR AVOIDANCE)
                 # =========================================================================
-                if (cPillar.area > 0 or (currTime < pillar_evade_until and last_evade_pillar_target is not None)) and not tempParking:
+                if (cPillar.area > 0 or (currTime < pillar_evade_until and last_evade_pillar_target is not None)):
                     if cPillar.area > 0:
                         last_evade_pillar_target = cPillar.target
                         pillar_evade_until = currTime + 0.70  # Hold evasion heading for 700ms so chassis & rear wheels cleanly pass
@@ -628,20 +628,20 @@ def main():
             # -------------------------------------------------------------
             # 4. FINAL LAP MAGENTA PARKING LOT ALGORITHM (Strictly after 3 Laps: t >= 12)
             # -------------------------------------------------------------
-            if t >= 12 and not isTurning and not tempParking:
-                print("=" * 65)
-                print(f"[PARKING] 12 turns (3 FULL LAPS) complete! Searching for Magenta Parking Lot...")
-                print("=" * 65)
-                tempParking = True
+            if t >= 12 and not isTurning:
+                if not tempParking:
+                    print("=" * 65)
+                    print(f"[PARKING] 12 turns (3 FULL LAPS) complete! Searching for Magenta Parking Lot...")
+                    print("=" * 65)
+                    tempParking = True
 
-            if tempParking and not isTurning:
-                if magentaArea > 2500:
+                if magentaArea > 1800:
                     navMode = "PARKING_LOT"
                     # Centroid of magenta contour to determine left vs right parking bay
                     magenta_max = max_contour(contours_magenta, ROI4)
                     mag_x = magenta_max[1]
                     midpoint = ROI4[0] + (ROI4[2] - ROI4[0]) // 2
-                    # 60 = LEFT bay, 140 = RIGHT bay
+                    # HARDWARE SERVO: 60 = LEFT bay, 140 = RIGHT bay
                     park_angle = sharpLeft if mag_x < midpoint else sharpRight
 
                     print(f"[PARKING] Magenta Lot Detected (Area: {magentaArea}, X: {mag_x}) -> Steering {'LEFT' if park_angle == sharpLeft else 'RIGHT'}...")
