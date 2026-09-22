@@ -23,7 +23,7 @@ SERVICE_FILE="/etc/systemd/system/wro_autostart.service"
 cat << EOF | sudo tee $SERVICE_FILE > /dev/null
 [Unit]
 Description=ROBOVANGUARD WRO 2026 Competition Autostart Service
-After=multi-user.target serial-getty@ttyUSB0.service network.target
+After=multi-user.target
 
 [Service]
 Type=simple

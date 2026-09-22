@@ -13,8 +13,7 @@
            used by the Round 1 control logic.
 */
 
-#include <Wire.h>
-#include <NewPing.h>
+#include <Wire.h>     // kept for a future I2C IMU on GPIO 21 (SDA) / 22 (SCL)
 #include <FastLED.h>
 
 // ########### Declerations ############################################################################################################ //
@@ -40,35 +39,8 @@ const int servo_chan = 4;     // Dedicated LEDC Channel 4 (isolated from DC moto
 const int servo_freq = 50;    // Standard 50Hz servo refresh rate (20ms period)
 const int servo_res = 14;     // 14-bit resolution (0 - 16383)
 
-// Ultrasonic Sensors
-
-#define FRONT_TRIGGER 12 
-#define FRONT_ECHO  4  
-
-#define FRONT1_TRIGGER 16
-#define FRONT1_ECHO 14
-
-#define FRONT2_TRIGGER 25 
-#define FRONT2_ECHO  26  
-
-#define BACK_TRIGGER 17
-#define BACK_ECHO 19
-
-#define LEFT_TRIGGER  2
-#define LEFT_ECHO  23
-
-#define RIGHT_TRIGGER 5
-#define RIGHT_ECHO  18
-
-#define MAX_DISTANCE 400
-
-NewPing sonar1(FRONT_TRIGGER, FRONT_ECHO, MAX_DISTANCE); 
-NewPing sonar5(FRONT1_TRIGGER, FRONT1_ECHO, MAX_DISTANCE); 
-NewPing sonar6(FRONT2_TRIGGER, FRONT2_ECHO, MAX_DISTANCE); 
-
-NewPing sonar2(BACK_TRIGGER, BACK_ECHO, MAX_DISTANCE); 
-NewPing sonar3(LEFT_TRIGGER, LEFT_ECHO, MAX_DISTANCE);
-NewPing sonar4(RIGHT_TRIGGER, RIGHT_ECHO, MAX_DISTANCE); 
+// Ultrasonic sensors removed (camera-only build). Their former pins are now free:
+// 2, 4, 5, 12, 14, 16, 17, 18, 19, 23, 25, 26
 
 
 
@@ -180,30 +152,13 @@ void execute_drive(int speed, int angle) {
   }
 }
 
-
-
-// UltraSonic Function
-
-void US_Values(int &f, int &f1, int &f2, int &b, int &l, int &r)
-{
-  unsigned int front_us = sonar1.ping_cm();
-  unsigned int front1_us = sonar5.ping_cm();
-  unsigned int front2_us = sonar6.ping_cm();
-  unsigned int back_us = sonar2.ping_cm(); 
-  unsigned int left_us = sonar3.ping_cm(); 
-  unsigned int right_us = sonar4.ping_cm(); 
-
-  f = front_us;
-  f1 = front1_us;
-  f2 = front2_us;
-  b = back_us;
-  l = left_us;
-  r = right_us;
-}
-
 // ########### Setup ############################################################################################################ //
 void setup() {
   Serial.begin(115200);
+
+  //######### Radios off (WRO rule 11.10: no wireless during rounds) #########//
+  WiFi.mode(WIFI_OFF);
+  btStop();
 
   //######### RGB Led Setup #########//
   FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, NUM_LEDS);
@@ -232,11 +187,11 @@ void setup() {
   ledcAttachPin(SERVO_PIN, servo_chan);
 #endif
 
-  // Quick diagnostic wiggle on boot to visually confirm servo hardware operation
-  moveServoTo(servo_center - 20);
-  delay(250);
-  moveServoTo(servo_center + 20);
-  delay(250);
+  // No boot wiggle: if the ESP32 ever resets mid-run, the wheels must not jerk
   moveServoTo(servo_center);
-  delay(250);
+
+  rgb_led(0, 0, 255); // Blue: idle, waiting for Pi commands
+  Serial.print("BOOT:READY:");
+  Serial.println(resetReasonName(esp_reset_reason()));
+  lastHeartbeatTime = millis();
 }
