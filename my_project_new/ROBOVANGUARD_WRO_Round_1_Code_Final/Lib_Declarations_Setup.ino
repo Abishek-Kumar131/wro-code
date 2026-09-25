@@ -1,3 +1,4 @@
+/* BRANCH: us-vision-hybrid  -  camera + 6 ultrasonic sensors (ESP32 pings one sensor per cycle) */
 /*
   ROBOVANGUARD – WRO Future Engineers 2026
   World Robot Olympiad – Future Engineers Division
