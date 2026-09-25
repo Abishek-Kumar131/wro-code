@@ -65,13 +65,15 @@ ROIS_WIDE = {
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
-# Mechanical steering range of this car: 100 = straight, 75 = full left, 125 = full right
-SERVO_MIN, SERVO_MAX = 75, 125
+# Usable steering range: 100 = straight, 70 = full left, 130 = full right (+-30).
+# Past about 30 deg the front tyres scrub and skid instead of steering, so this is the
+# usable limit rather than the mechanical one.
+SERVO_MIN, SERVO_MAX = 70, 130
 KP = 0.02               # Canada: 0.02
 KD = 0.006              # Canada: 0.006
-STRAIGHT_LIMIT = 15     # max steering offset from centre on straights
-TURN_DEVIATION = 25     # steering offset in a corner. 25 = full lock (the mechanical
-                        # limit). Lower it if corners are too sharp and the car cuts in.
+STRAIGHT_LIMIT = 18     # max steering offset from centre on straights
+TURN_DEVIATION = 30     # steering offset in a corner. 30 = full lock, the angle where
+                        # the tyres still grip. Lower it if the car cuts corners.
 
 # Turns
 TURN_THRESH = 150       # wall area at or below this: that wall has ended, start turning

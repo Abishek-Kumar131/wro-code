@@ -121,9 +121,10 @@ void motor_stop() {
 
 // Servo Functions using Hardware LEDC (50Hz, 14-bit)
 void moveServoTo(int angle) {
-  // Hard limit of the steering linkage: 75 to 125 deg (100 = straight).
-  // Nothing past this is reachable, so clamp here as well as on the Pi.
-  angle = constrain(angle, 75, 125);
+  // Steering limit: 70 to 130 deg (100 = straight, so +-30).
+  // Past about 30 deg the front tyres scrub and skid instead of steering, so this is
+  // the usable limit, not just the mechanical one. Clamped here as well as on the Pi.
+  angle = constrain(angle, 70, 130);
   // Map angle (0 - 180 deg) to standard servo pulse width (500us to 2400us)
   long pulse_us = map(angle, 0, 180, 500, 2400);
   // Convert pulse width (in microseconds) to 14-bit duty cycle at 50Hz (20,000us period):

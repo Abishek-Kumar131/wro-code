@@ -81,8 +81,9 @@ ROIS_WIDE = {
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
-# Mechanical steering range of this car: 100 = straight, 75 = full left, 125 = full right
-SHARP_LEFT, SHARP_RIGHT = 75, 125
+# Usable steering range: 100 = straight, 70 = full left, 130 = full right (+-30).
+# Past about 30 deg the front tyres scrub and skid instead of steering.
+SHARP_LEFT, SHARP_RIGHT = 70, 130
 KP, KD = 0.015, 0.01                        # wall PD (no pillar)
 PILLAR_GAINS = {"normal": (0.25, 0.25, 0.08, 40),     # (kp, kd, cy, end_const)
                 "crowded": (0.20, 0.20, 0.05, 70)}    # 2+ pillars of one colour (inside corner)
