@@ -263,6 +263,12 @@ def main():
     if not args.no_wait:
         wait_for_button_press(args.pin, args.active_high, camera, show, WINDOW)
 
+    warn = link.health_warning()
+    if warn:
+        print("=" * 66)
+        print(f"[WARNING] Before starting: {warn}")
+        print("=" * 66)
+
     # ------------------------------------------------- baseline for the finish detection
     us.update()
     baseline = dict(us.values)
