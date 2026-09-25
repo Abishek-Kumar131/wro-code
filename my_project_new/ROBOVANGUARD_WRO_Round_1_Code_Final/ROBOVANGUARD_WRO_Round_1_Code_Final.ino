@@ -34,10 +34,10 @@ int turn_delay = 2000;  // ms (corner arc duration for the LEFT/RIGHT commands)
 int fus_slow_speed = 225; // PWM when a wall is close ahead (AUTO_US_ON mode only)
 int fus_slow_dist = 80;   // cm front distance that triggers that slowdown
 
-//#---Servo Angles (+-40 deg steering range)---###########################################
+//#---Servo Angles (+-25 deg mechanical steering range)---###############################
 int servo_center = 100;                  // 100 deg (Straight center)
-int left_turn_angle = servo_center - 40; // 60 deg (Left turn)
-int right_turn_angle = servo_center + 40;// 140 deg (Right turn)
+int left_turn_angle = servo_center - 25; // 75 deg (full left)
+int right_turn_angle = servo_center + 25;// 125 deg (full right)
 int target_wall_dist = 25;               // cm target distance from a side wall
 //#######################################################################################
 

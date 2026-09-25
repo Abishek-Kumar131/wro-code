@@ -25,6 +25,7 @@ Fixed since the version on main:
     instead of blocking the loop blind for up to 1.2 s.
   - Removed the AUTO_US_ON call before the finish: any DRIVE command cancels it anyway.
   - Any exception now stops the car and prints why, instead of only Ctrl+C.
+  - Steering limited to 75-125 degrees to match the mechanical range of this linkage.
 
 Usage
   python3 open_challenge_R1.py                  wait for button, run 3 laps
@@ -55,7 +56,8 @@ ROI_LINE = [200, 300, 440, 350]
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
-SERVO_MIN, SERVO_MAX = 60, 140
+# Mechanical steering range of this car: 100 = straight, 75 = full left, 125 = full right
+SERVO_MIN, SERVO_MAX = 75, 125
 DUAL_WALL_GAIN = 0.015      # both walls visible: centre between them
 SINGLE_WALL_GAIN = 0.01     # fallback
 CORNER_APPROACH_GAIN = 0.008
@@ -216,11 +218,11 @@ def main():
 
                 if right_hit or left_hit or front_hit:
                     if right_hit:
-                        rev_steer, what = 65, "RIGHT/INNER WALL"
+                        rev_steer, what = SERVO_MIN + 10, "RIGHT/INNER WALL"
                     elif left_hit:
-                        rev_steer, what = 135, "LEFT/INNER WALL"
+                        rev_steer, what = SERVO_MAX - 10, "LEFT/INNER WALL"
                     else:
-                        rev_steer, what = (65 if turn_dir == "right" else 135), "FRONT WALL"
+                        rev_steer, what = (SERVO_MIN + 10 if turn_dir == "right" else SERVO_MAX - 10), "FRONT WALL"
                     print(f"[REVERSE] {what} too close ({us.text()}) -> backing off at {rev_steer} deg")
 
                     rev_start = time.time()
@@ -309,9 +311,9 @@ def main():
 
                 if use_us:      # nudge away from a side wall we are about to touch
                     if us.near("r", SIDE_NUDGE_CM):
-                        angle = min(angle, SERVO_CENTER - 20)
+                        angle = min(angle, SERVO_CENTER - 15)
                     elif us.near("l", SIDE_NUDGE_CM):
-                        angle = max(angle, SERVO_CENTER + 20)
+                        angle = max(angle, SERVO_CENTER + 15)
 
                 angle = int(clamp(angle, SERVO_MIN, SERVO_MAX))
 
