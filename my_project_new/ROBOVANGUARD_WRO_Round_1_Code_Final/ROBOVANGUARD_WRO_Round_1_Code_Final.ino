@@ -1,4 +1,5 @@
-/* BRANCH: us-vision-hybrid  -  camera + 6 ultrasonic sensors (ESP32 pings one sensor per cycle) */
+/* SHARED FIRMWARE - byte-identical on every branch.
+   Flash it once. Switching the Pi between branches needs NO re-flash. */
 /*
   ROBOVANGUARD – WRO Future Engineers 2026
   World Robot Olympiad – Future Engineers Division
@@ -9,20 +10,30 @@
   Hardware Lead: V. Rakshit (EEE) – Reg. No: 953623105044
   Mechanical: P. Chandru (Mech) – Reg. No: 953623114009
 
-  Hybrid architecture (camera on the Pi 5 + 6 ultrasonic sensors on the ESP32):
-  - The Pi 5 does the vision and sends DRIVE:<speed>:<angle>.
-  - This ESP32 drives the motor/servo and streams ultrasonic telemetry.
+  The Pi 5 does all the vision and decisions and sends DRIVE:<speed>:<angle>.
+  This ESP32 only drives the motor and steering servo, and reports what it senses.
+
+  Ultrasonic sensors are OPTIONAL. This firmware always reads them and always streams
+  the US: line, so both Pi branches work against the same binary:
+    - us-vision-hybrid          uses the readings
+    - camera-only-canada-strategy  ignores them
+  With no sensors connected, every reading simply stays 0 ("nothing in range") and
+  nothing else changes.
+
   - ONE sensor is pinged per cycle, 20 ms apart (fixed: pinging all six back to back
     blocked the loop for up to 140 ms and made the readings cross-talk).
     All six refresh every ~120 ms and the loop never blocks for more than one ping.
-  - Failsafe: the motor stops if no command arrives for 500 ms (now applies during
-    timed arc turns too).
+  - Failsafe: the motor stops if no command arrives for 500 ms (applies during timed
+    arc turns too).
+  - Steering is limited to 75-125 degrees, the mechanical range of this linkage.
   - Telemetry to the Pi:
       US:F:..,F1:..,F2:..,L:..,R:..,B:..   every 100 ms (0 = nothing in range)
       BOOT:READY:<reset reason>           once at start-up (BROWNOUT = supply dipped)
       HB:<uptime ms>                      every 500 ms (uptime going back = it rebooted)
       INFO:FAILSAFE_STOP                  when the failsafe stops the motor
   - Wi-Fi and Bluetooth are switched off (WRO rule 11.10).
+
+  Requires the NewPing and FastLED libraries in the Arduino IDE.
 */
 
 #include <WiFi.h>

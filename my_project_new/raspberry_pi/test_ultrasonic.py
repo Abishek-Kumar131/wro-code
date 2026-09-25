@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-BRANCH: us-vision-hybrid  (camera + 6 ultrasonic sensors)
-
 ROBOVANGUARD - WRO Future Engineers 2026
 Ultrasonic sensor test and diagnostic tool.
+
+Works on every branch: the firmware is shared and always streams the sensor readings,
+whether or not the Pi code uses them. us-vision-hybrid drives on them;
+camera-only-canada-strategy ignores them.
 
 Shows every sensor live and, when you stop it, prints a verdict per sensor so you can
 tell a dead sensor from a noisy one. Nothing moves: the motor is never commanded.
@@ -123,7 +125,7 @@ def main():
     keys = (args.sensor,) if args.sensor else KEYS
 
     print("=" * 74)
-    print("   ROBOVANGUARD - Ultrasonic sensor test   (branch: us-vision-hybrid)")
+    print("   ROBOVANGUARD - Ultrasonic sensor test")
     print("   The motor is never commanded. Ctrl+C to stop and see the summary.")
     print("=" * 74)
 
@@ -179,8 +181,8 @@ def main():
             if (not warned_no_telemetry and now - t_start > 3.0 and link.stats["us_lines"] == 0):
                 warned_no_telemetry = True
                 print("\n[WARNING] The ESP32 has not sent a single US: line in 3 s.")
-                print("          This branch's firmware should send them 10x per second.")
-                print("          Re-flash the firmware from this branch, then run this again.\n")
+                print("          The shared firmware sends them 10x per second on every branch,")
+                print("          so the ESP32 is probably running older firmware - re-flash it.\n")
                 printed_lines = 0
 
             time.sleep(max(0.01, 1.0 / args.rate))
@@ -197,8 +199,8 @@ def main():
         print("=" * 74)
         if link.stats["us_lines"] == 0:
             print("  No ultrasonic telemetry was received at all.")
-            print("  The firmware on the ESP32 is not sending US: lines - re-flash this branch's")
-            print("  firmware. Nothing below is meaningful until that is fixed.")
+            print("  The shared firmware sends US: lines on every branch, so the ESP32 is likely")
+            print("  running older firmware - re-flash it. Nothing below is meaningful until then.")
         for k in keys:
             tag, why = stats[k].verdict(args.expect)
             print(f"  {LABELS[k]:>11s} ({k:2s})  {tag:7s}  {why}")

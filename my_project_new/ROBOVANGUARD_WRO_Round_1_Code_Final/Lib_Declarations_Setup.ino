@@ -1,4 +1,6 @@
-/* BRANCH: us-vision-hybrid  -  camera + 6 ultrasonic sensors (ESP32 pings one sensor per cycle) */
+/* SHARED FIRMWARE - byte-identical on every branch.
+   Flash it once. Switching the Pi between branches needs NO re-flash.
+   Ultrasonic sensors are optional: with none connected every reading stays 0. */
 /*
   ROBOVANGUARD – WRO Future Engineers 2026
   World Robot Olympiad – Future Engineers Division
