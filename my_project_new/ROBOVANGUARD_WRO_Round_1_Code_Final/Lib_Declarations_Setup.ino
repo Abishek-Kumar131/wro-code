@@ -1,3 +1,4 @@
+/* BRANCH: camera-only-canada-strategy  -  camera only, ESP32 reads NO sensors */
 /*
   ROBOVANGUARD – WRO Future Engineers 2026
   World Robot Olympiad – Future Engineers Division

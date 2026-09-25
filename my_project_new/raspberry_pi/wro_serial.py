@@ -72,7 +72,8 @@ class WROSerialController:
         self.last_rx_time = 0.0
         self._last_uptime_ms = None
         self.stats = {"disconnects": 0, "reconnects": 0, "esp_reboots": 0,
-                      "failsafe_stops": 0, "dropped_writes": 0, "last_reset_reason": None}
+                      "failsafe_stops": 0, "dropped_writes": 0, "last_reset_reason": None,
+                      "us_lines": 0}
 
         if auto_connect:
             self.connect()
@@ -307,6 +308,7 @@ class WROSerialController:
             return
 
         if line.startswith("US:"):
+            self.stats["us_lines"] += 1
             try:
                 for part in line[3:].split(","):
                     k, v = part.split(":")
