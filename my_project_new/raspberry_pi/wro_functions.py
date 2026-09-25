@@ -14,15 +14,38 @@ from masks import rMagenta
 KERNEL5 = np.ones((5, 5), np.uint8)
 
 
-class CameraManager:
-    """Universal Camera abstraction supporting both Picamera2 and OpenCV USB Webcams with Zero-Lag Direct Capture."""
+def is_wide(w, h):
+    """True if this frame is 16:9 (the camera's full width) rather than a 4:3 crop."""
+    return h > 0 and abs((w / float(h)) - (16.0 / 9.0)) < 0.12
 
-    def __init__(self, force_webcam=False, device_index=0):
+
+class CameraManager:
+    """
+    Camera abstraction for Picamera2 and USB webcams.
+
+    Captures 16:9 by default, because asking a 16:9 webcam for a 4:3 size (like the old
+    fixed 640x480) makes most cameras CROP the left and right edges off the sensor -
+    throwing away about 25% of the horizontal field of view, which is exactly the width
+    needed to see both track walls at once.
+
+    Frames larger than max_width are downscaled, so a camera that only offers 1280x720
+    still costs the same CPU as a small mode. Use wide=False to go back to 4:3.
+    """
+
+    MODES_WIDE = [(848, 480), (960, 540), (1280, 720), (640, 360)]
+    MODES_43 = [(640, 480), (800, 600), (320, 240)]
+
+    def __init__(self, force_webcam=False, device_index=0, wide=True, max_width=960):
         self.force_webcam = force_webcam
         self.device_index = device_index
+        self.wide = wide
+        self.max_width = max_width
         self.cap = None
         self.picam2 = None
         self.is_webcam = False
+        self.width = 0
+        self.height = 0
+        self._resize_to = None      # (w, h) when the captured frame must be downscaled
 
     def start(self):
         if self.force_webcam:
@@ -30,72 +53,130 @@ class CameraManager:
         else:
             try:
                 from picamera2 import Picamera2
-                print("[INFO] Initializing Picamera2 (Pi CSI Camera)...")
+                size = (1280, 720) if self.wide else (640, 480)
+                print(f"[INFO] Initializing Picamera2 (Pi CSI Camera) at {size[0]}x{size[1]}...")
                 self.picam2 = Picamera2()
-                self.picam2.preview_configuration.main.size = (640, 480)
+                self.picam2.preview_configuration.main.size = size
                 self.picam2.preview_configuration.main.format = "RGB888"
                 self.picam2.preview_configuration.controls.FrameRate = 30
                 self.picam2.preview_configuration.align()
                 self.picam2.configure("preview")
                 self.picam2.start()
                 self.is_webcam = False
+                probe = self.picam2.capture_array()
+                self._note_size(probe)
                 print("[SUCCESS] Picamera2 initialized!")
             except Exception as e:
                 print(f"[INFO] Picamera2 not available ({e}). Switching to USB Webcam...")
                 self._start_webcam()
 
+    def _note_size(self, frame):
+        """Records the frame size actually delivered, and sets up downscaling if needed."""
+        if frame is None:
+            return
+        h, w = frame.shape[:2]
+        if self.max_width and w > self.max_width:
+            scale = self.max_width / float(w)
+            self._resize_to = (int(w * scale), int(h * scale))
+            self.width, self.height = self._resize_to
+            print(f"[CAMERA] Capturing {w}x{h}, downscaling to {self.width}x{self.height}")
+        else:
+            self._resize_to = None
+            self.width, self.height = w, h
+            print(f"[CAMERA] Capturing {w}x{h}")
+
+        if self.wide and not is_wide(self.width, self.height):
+            print("[CAMERA WARNING] Asked for a 16:9 mode but got "
+                  f"{self.width}x{self.height}. This camera is cropping the sides off the "
+                  "sensor, so part of the field of view is lost. Run test_camera_fov.py "
+                  "to see which modes it really supports.", file=sys.stderr)
+
+    def _open(self, idx, backend, w, h):
+        cap = cv2.VideoCapture(idx, backend)
+        if not cap or not cap.isOpened():
+            return None, None
+        # FOURCC first: MJPG cuts USB bandwidth from ~20MB/s to ~1MB/s
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        # Double-buffering avoids uvcvideo FIFO underrun / select() timeouts
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        frame = None
+        for _ in range(3):
+            ret, f = cap.read()
+            if ret and f is not None and f.size > 0:
+                frame = f
+        if frame is None:
+            cap.release()
+            return None, None
+        return cap, frame
+
     def _start_webcam(self):
         search_indices = [self.device_index, 0, 1, 2, 3, 4, 5, 6, 8]
         seen = set()
         search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
+        modes = self.MODES_WIDE if self.wide else self.MODES_43
+        backends = [cv2.CAP_V4L2, cv2.CAP_ANY] if sys.platform.startswith("linux") else [cv2.CAP_ANY]
 
+        fallback = None     # a working camera whose aspect is not what we asked for
         for idx in search_indices:
             print(f"[INFO] Testing USB Webcam index {idx}...")
-            for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-                try:
-                    cap = cv2.VideoCapture(idx, backend)
-                    if cap and cap.isOpened():
-                        # 1. Set FOURCC to hardware MJPG FIRST (drastically reduces USB bus bandwidth from 20MB/s to 1MB/s)
-                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                        # 2. Set Frame Dimensions
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        cap.set(cv2.CAP_PROP_FPS, 30)
-                        # 3. Use double-buffering (2) to prevent Linux uvcvideo kernel driver FIFO underrun / select() timeout
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-
-                        # Test capture frames to verify real webcam device
-                        for _ in range(3):
-                            ret, frame = cap.read()
-                            if ret and frame is not None and frame.size > 0:
-                                print(f"[SUCCESS] USB Webcam initialized on index {idx} (/dev/video{idx}) in MJPG 640x480 mode!")
-                                self.cap = cap
-                                self.device_index = idx
-                                self.is_webcam = True
-                                return
+            for backend in backends:
+                for (w, h) in modes:
+                    try:
+                        cap, frame = self._open(idx, backend, w, h)
+                    except Exception:
+                        cap, frame = None, None
+                    if cap is None:
+                        continue
+                    fh, fw = frame.shape[:2]
+                    if (not self.wide) or is_wide(fw, fh):
+                        print(f"[SUCCESS] USB Webcam on index {idx} (/dev/video{idx}), "
+                              f"asked {w}x{h}, got {fw}x{fh}")
+                        self.cap = cap
+                        self.device_index = idx
+                        self.is_webcam = True
+                        self._note_size(frame)
+                        return
+                    if fallback is None:
+                        fallback = (idx, cap, frame)     # keep it in case nothing is 16:9
+                    else:
                         cap.release()
-                except Exception:
-                    pass
+
+        if fallback is not None:
+            idx, cap, frame = fallback
+            print(f"[WARNING] No 16:9 mode worked on this camera; using what it gave instead.")
+            self.cap = cap
+            self.device_index = idx
+            self.is_webcam = True
+            self._note_size(frame)
+            return
 
         print("[ERROR] Could not find any working USB webcam across indices 0-8!", file=sys.stderr)
         self.is_webcam = True
         self.cap = None
 
     def capture_array(self):
+        frame = None
         if self.is_webcam:
             if self.cap is not None:
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    return frame
+                ret, f = self.cap.read()
+                if ret and f is not None:
+                    frame = f
                 else:
                     # Quick recovery retry on transient single-frame drop
                     for _ in range(2):
-                        ret, frame = self.cap.read()
-                        if ret and frame is not None:
-                            return frame
-            return None
+                        ret, f = self.cap.read()
+                        if ret and f is not None:
+                            frame = f
+                            break
         else:
-            return self.picam2.capture_array()
+            frame = self.picam2.capture_array()
+
+        if frame is not None and self._resize_to is not None:
+            frame = cv2.resize(frame, self._resize_to, interpolation=cv2.INTER_AREA)
+        return frame
 
     def stop(self):
         if self.is_webcam and self.cap:
@@ -114,6 +195,33 @@ class CameraManager:
 # Colour masks. Convert an ROI once with roi_hsv_lab(), then build any number of
 # masks from the same conversion. All thresholds live in masks.py.
 # ============================================================================
+
+def roi_px(frac, w, h):
+    """
+    Turns a fraction-of-frame ROI (x1, y1, x2, y2, each 0..1) into a pixel box for this
+    frame size. ROIs are stored as fractions so that changing the capture resolution
+    does not silently move every box to the wrong part of the world.
+    """
+    x1 = max(0, min(w - 2, int(round(frac[0] * w))))
+    x2 = max(x1 + 1, min(w, int(round(frac[2] * w))))
+    y1 = max(0, min(h - 2, int(round(frac[1] * h))))
+    y2 = max(y1 + 1, min(h, int(round(frac[3] * h))))
+    return [x1, y1, x2, y2]
+
+
+def area_norm(w, h):
+    """
+    Scale factor that converts a measured contour area into '640x480 equivalent pixels',
+    so the area thresholds in the navigation code keep their meaning at any resolution.
+
+    On a 16:9 frame there is a second factor. The wide ROI fractions are narrower than
+    the 4:3 ones (a 4:3 crop is 75% of the 16:9 width), so the ROI stays about the same
+    size in pixels while the frame itself got wider. Dividing by frame area alone would
+    then make the same wall measure about 25% smaller, quietly shifting every threshold.
+    """
+    base = (640.0 * 480.0) / float(max(1, w * h))
+    return base / 0.75 if is_wide(w, h) else base
+
 
 def _in(img, rng):
     return cv2.inRange(img, np.array(rng[0], dtype=np.uint8), np.array(rng[1], dtype=np.uint8))
@@ -283,6 +391,69 @@ class FpsCounter:
             inst = 1.0 / dt
             self.fps = inst if self.fps == 0 else 0.9 * self.fps + 0.1 * inst
         return self.fps
+
+
+class Ultrasonics:
+    """
+    Reads the ESP32's ultrasonic telemetry safely.
+
+    Two rules that the old code got wrong:
+      - 0 means "nothing within range", NOT "a wall is touching us". Every test here
+        requires a positive reading, so open track can never look like a collision.
+      - near() only reports True after the condition holds on `confirm` consecutive
+        updates, which rejects the single-frame spikes these sensors produce.
+
+    Call update() once per camera frame, then near()/get() as often as you like.
+    """
+
+    KEYS = ("f", "f1", "f2", "l", "r", "b")
+
+    def __init__(self, link, confirm=2, max_valid=400):
+        self.link = link
+        self.confirm = confirm
+        self.max_valid = max_valid
+        self.values = {k: 0 for k in self.KEYS}
+        self._counts = {}
+        self._frame = 0
+
+    def update(self):
+        data = self.link.get_us_data()
+        for k in self.KEYS:
+            try:
+                self.values[k] = int(data.get(k, 0) or 0)
+            except (TypeError, ValueError):
+                self.values[k] = 0
+        # Advance every counter here, not in near(), so the count tracks sensor updates
+        # even on frames where the caller does not test that condition.
+        for slot in self._counts:
+            key, cm = slot
+            self._counts[slot] = self._counts[slot] + 1 if self._hit(key, cm) else 0
+        self._frame += 1
+        return self.values
+
+    def get(self, key):
+        return self.values.get(key, 0)
+
+    def valid(self, key):
+        """True if this sensor returned a usable reading (not 0, not absurd)."""
+        return 0 < self.values.get(key, 0) <= self.max_valid
+
+    def _hit(self, key, cm):
+        return self.valid(key) and self.values[key] <= cm
+
+    def near(self, key, cm):
+        """True once this sensor has read 0 < value <= cm on `confirm` consecutive updates."""
+        slot = (key, cm)
+        if slot not in self._counts:
+            self._counts[slot] = 1 if self._hit(key, cm) else 0
+        return self._counts[slot] >= self.confirm
+
+    def clear_ahead(self, cm):
+        """True if none of the three front sensors sees anything closer than cm."""
+        return all(self.values[k] == 0 or self.values[k] >= cm for k in ("f", "f1", "f2"))
+
+    def text(self):
+        return " ".join(f"{k.upper()}:{self.values[k]}" for k in self.KEYS)
 
 
 def _make_button_reader(gpio_pin, active_high):

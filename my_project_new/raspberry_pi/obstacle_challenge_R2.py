@@ -45,18 +45,39 @@ from masks import PILLAR_GREEN_MIN_ASPECT, PILLAR_RED_MIN_ASPECT
 from wro_serial import WROSerialController, Drive
 from wro_functions import (CameraManager, FpsCounter, roi_hsv_lab, wall_mask, orange_mask, blue_mask,
                            red_mask, green_mask, magenta_mask, contours_of, max_contour,
-                           draw_roi, draw_offset_contours, wait_for_button_press)
+                           draw_roi, draw_offset_contours, wait_for_button_press,
+                           roi_px, area_norm, is_wide)
 
 # ============================================================================ tuning
-RED_TARGET = 110            # image x a red pillar is steered to (pillar on the car's left)
-GREEN_TARGET = 530          # image x a green pillar is steered to (pillar on the car's right)
+# Camera regions, stored as FRACTIONS of the frame (x1, y1, x2, y2, each 0..1) so they
+# follow the capture resolution instead of being pinned to one frame size.
+#
+# There are two sets because a 16:9 frame shows more to the left and right than a 4:3
+# crop of the same camera. A 4:3 crop covers the middle 75% of the 16:9 width, so an x
+# fraction converts as  x_wide = 0.125 + 0.75 * x_43 . The y fractions are identical:
+# cropping to 4:3 removes width, not height.
+#
+# Contour areas are normalised to "640x480 equivalent pixels", so every area threshold
+# below keeps its meaning whatever resolution the camera gives.
+# Pillar targets convert the same way. In 16:9 the wall ROIs take a full half of the frame
+# each and the pillar ROI the full width, spending the recovered view where it helps most.
+TARGETS_43 = {"red": 0.172, "green": 0.828, "red_min_x": 0.344, "green_max_x": 0.656}
+TARGETS_WIDE = {"red": 0.254, "green": 0.746, "red_min_x": 0.383, "green_max_x": 0.617}
 
-# Camera regions [x1, y1, x2, y2] on the 640x480 frame (Canada's obstacle-round layout)
-ROI_LEFT = [0, 175, 330, 265]
-ROI_RIGHT = [330, 175, 640, 265]
-ROI_PILLAR_BASE = [RED_TARGET - 50, 120, GREEN_TARGET + 50, 345]
-ROI_FLOOR_BASE = [200, 260, 440, 310]       # floor lines + what is directly ahead
-ROI_CORNER = [270, 120, 370, 140]           # switched on near corners only
+ROIS_43 = {
+    "left":   (0.000, 0.365, 0.516, 0.552),
+    "right":  (0.516, 0.365, 1.000, 0.552),
+    "pillar": (0.094, 0.250, 0.906, 0.719),
+    "floor":  (0.313, 0.542, 0.688, 0.646),
+    "corner": (0.422, 0.250, 0.578, 0.292),
+}
+ROIS_WIDE = {
+    "left":   (0.000, 0.365, 0.500, 0.552),
+    "right":  (0.500, 0.365, 1.000, 0.552),
+    "pillar": (0.000, 0.250, 1.000, 0.719),
+    "floor":  (0.359, 0.542, 0.641, 0.646),
+    "corner": (0.441, 0.250, 0.559, 0.292),
+}
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
@@ -105,7 +126,7 @@ class Pillar:
         self.dist = 1_000_000
         self.x = 0
         self.y = 0
-        self.target = GREEN_TARGET
+        self.target = 0
         self.w = 0
         self.h = 0
 
@@ -120,6 +141,7 @@ def parse_args():
     p.add_argument("--dir", choices=["left", "right"], help="force track direction")
     p.add_argument("--turns", type=int, default=TOTAL_TURNS, help="start parking after this many turns")
     p.add_argument("--steer-only", action="store_true", help="motor off; steering still reacts")
+    p.add_argument("--narrow", action="store_true", help="capture 4:3 instead of full-width 16:9")
     args, unknown = p.parse_known_args()
     if unknown:
         print(f"[CONFIG] Ignoring old/unknown arguments: {unknown}")
@@ -133,8 +155,9 @@ def find_pillar(contours, target, colour, best, roi, ctx):
     """
     count = 0
     too_close = 0
+    sx, sy = 640.0 / ctx["fw"], 480.0 / ctx["fh"]     # frame px -> 640x480 equivalent
     for cnt in contours:
-        area = cv2.contourArea(cnt)
+        area = cv2.contourArea(cnt) * ctx["area"]
         if colour == "red":
             if area <= RED_MIN_AREA:
                 continue
@@ -145,18 +168,19 @@ def find_pillar(contours, target, colour, best, roi, ctx):
         x, y, w, h = cv2.boundingRect(cnt)
         x += roi[0] + w // 2
         y += roi[1] + h
-        dist = round(math.dist([x, y], [320, 480]))
+        dist = round(math.dist([x * sx, y * sy], [320, 480]))
 
         if 160 < dist < 380:
             count += 1
 
         if True:
-            limit, in_path = (RED_TOO_CLOSE, x >= 220) if colour == "red" else (GREEN_TOO_CLOSE, x <= 420)
+            limit, in_path = ((RED_TOO_CLOSE, x >= ctx["red_min_x"]) if colour == "red"
+                              else (GREEN_TOO_CLOSE, x <= ctx["green_max_x"]))
             if area > limit and in_path:
                 too_close = max(too_close, int(area))
 
         # Drop pillars that are passing under the nose, or while a wall fills the view
-        if y > roi[3] - ctx["end_const"] or dist > MAX_DIST:
+        if y > roi[3] - ctx["end_const"] / sy or dist > MAX_DIST:
             continue
         skip_wall = RED_SKIP_WALL if colour == "red" else GREEN_SKIP_WALL
         if ctx["left_area"] > skip_wall or ctx["right_area"] > skip_wall:
@@ -190,15 +214,40 @@ def main():
             print(f"[DISPLAY] No window available ({e}); continuing without display.")
             show = False
 
-    camera = CameraManager(force_webcam=args.webcam)
+    camera = CameraManager(force_webcam=args.webcam, wide=not args.narrow)
     camera.start()
-    for _ in range(15):
-        camera.capture_array()
+    probe = None
+    for _ in range(15):            # let auto-exposure settle, and learn the frame size
+        f = camera.capture_array()
+        if f is not None:
+            probe = f
+    if probe is None:
+        print("[ERROR] The camera returned no frames. Run test_camera_fov.py to check it.")
+        link.disconnect()
+        return
+
+    FRAME_H, FRAME_W = probe.shape[:2]
+    wide = is_wide(FRAME_W, FRAME_H)
+    rois = ROIS_WIDE if wide else ROIS_43
+    targets = TARGETS_WIDE if wide else TARGETS_43
+    ROI_LEFT = roi_px(rois["left"], FRAME_W, FRAME_H)
+    ROI_RIGHT = roi_px(rois["right"], FRAME_W, FRAME_H)
+    ROI_CORNER = roi_px(rois["corner"], FRAME_W, FRAME_H)
+    RED_TARGET = int(targets["red"] * FRAME_W)
+    GREEN_TARGET = int(targets["green"] * FRAME_W)
+    AREA = area_norm(FRAME_W, FRAME_H)
+    GEOM = {"fw": FRAME_W, "fh": FRAME_H, "area": AREA,
+            "red_min_x": targets["red_min_x"] * FRAME_W,
+            "green_max_x": targets["green_max_x"] * FRAME_W}
+    print(f"[CAMERA] {FRAME_W}x{FRAME_H} "
+          f"({'16:9 - full sensor width' if wide else '4:3 - sides cropped off the sensor'})")
+    print(f"[ROI] left {ROI_LEFT}  right {ROI_RIGHT}  corner {ROI_CORNER}")
+    print(f"[ROI] pillar targets: red x={RED_TARGET}, green x={GREEN_TARGET}")
 
     # ------------------------------------------------------------------ run state
     red_target, green_target = RED_TARGET, GREEN_TARGET
-    roi_pillar = list(ROI_PILLAR_BASE)
-    roi_floor = list(ROI_FLOOR_BASE)
+    roi_pillar = roi_px(rois["pillar"], FRAME_W, FRAME_H)
+    roi_floor = roi_px(rois["floor"], FRAME_W, FRAME_H)
     corner_on = False
 
     turn_dir = args.dir or "none"
@@ -253,15 +302,15 @@ def main():
             wall_r = cv2.bitwise_or(wall_r, mag_r)
             c_left = contours_of(wall_l, 100)
             c_right = contours_of(wall_r, 100)
-            left_area = max_contour(c_left, ROI_LEFT)[0]
-            right_area = max_contour(c_right, ROI_RIGHT)[0]
-            lot_left = max_contour(contours_of(mag_l, 100), ROI_LEFT)
-            lot_right = max_contour(contours_of(mag_r, 100), ROI_RIGHT)
+            # areas normalised to 640x480-equivalent pixels so the thresholds above hold
+            left_area = int(max_contour(c_left, ROI_LEFT)[0] * AREA)
+            right_area = int(max_contour(c_right, ROI_RIGHT)[0] * AREA)
+            lot_left_area = int(max_contour(contours_of(mag_l, 100), ROI_LEFT)[0] * AREA)
+            lot_right_area = int(max_contour(contours_of(mag_r, 100), ROI_RIGHT)[0] * AREA)
 
             hsv_f, lab_f = roi_hsv_lab(img, roi_floor)
-            front_area = max_contour(contours_of(wall_mask(hsv_f, lab_f), 100), roi_floor)[0]
-            orange_area = max_contour(contours_of(orange_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0]
-            blue_area = max_contour(contours_of(blue_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0]
+            orange_area = int(max_contour(contours_of(orange_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0] * AREA)
+            blue_area = int(max_contour(contours_of(blue_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0] * AREA)
 
             hsv_p, _ = roi_hsv_lab(img, roi_pillar)
             c_red = contours_of(red_mask(hsv_p), PILLAR_PREFILTER_AREA, PILLAR_RED_MIN_ASPECT)
@@ -270,15 +319,15 @@ def main():
             corner_area = 0
             if corner_on:
                 hsv_c, lab_c = roi_hsv_lab(img, ROI_CORNER)
-                corner_area = (max_contour(contours_of(wall_mask(hsv_c, lab_c), 50), ROI_CORNER)[0]
-                               + max_contour(contours_of(magenta_mask(lab_c), 50), ROI_CORNER)[0])
+                corner_area = int((max_contour(contours_of(wall_mask(hsv_c, lab_c), 50), ROI_CORNER)[0]
+                                   + max_contour(contours_of(magenta_mask(lab_c), 50), ROI_CORNER)[0]) * AREA)
 
             # ---------------------------------------------------------- pillars
-            ctx = {"left_area": left_area, "right_area": right_area}
-            probe = Pillar()
+            ctx = dict(GEOM, left_area=left_area, right_area=right_area)
+            scan = Pillar()
             # choose gains from how many pillars of one colour are in view
-            n_g, _ = find_pillar(c_green, green_target, "green", probe, roi_pillar, dict(ctx, end_const=40))
-            n_r, _ = find_pillar(c_red, red_target, "red", probe, roi_pillar, dict(ctx, end_const=40))
+            n_g, _ = find_pillar(c_green, green_target, "green", scan, roi_pillar, dict(ctx, end_const=40))
+            n_r, _ = find_pillar(c_red, red_target, "red", scan, roi_pillar, dict(ctx, end_const=40))
             gains = "crowded" if (n_g >= 2 or n_r >= 2) else "normal"
             c_kp, c_kd, c_y, end_const = PILLAR_GAINS[gains]
             ctx["end_const"] = end_const
@@ -351,9 +400,9 @@ def main():
                     corner_on = False
 
                 # keep away from the parking lot
-                if lot_right[0] > LOT_AVOID_AREA:
+                if lot_right_area > LOT_AVOID_AREA:
                     angle = SHARP_LEFT
-                elif lot_left[0] > LOT_AVOID_AREA:
+                elif lot_left_area > LOT_AVOID_AREA:
                     angle = SHARP_RIGHT
 
                 # turn exit by wall, and default turn angles when no pillar is in view
