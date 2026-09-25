@@ -46,7 +46,7 @@ from wro_serial import WROSerialController, Drive
 from wro_functions import (CameraManager, FpsCounter, roi_hsv_lab, wall_mask, orange_mask, blue_mask,
                            red_mask, green_mask, magenta_mask, contours_of, max_contour,
                            draw_roi, draw_offset_contours, wait_for_button_press,
-                           roi_px, area_norm, is_wide)
+                           roi_px, area_norm, is_wide, apply_roi_config)
 
 # ============================================================================ tuning
 # Camera regions, stored as FRACTIONS of the frame (x1, y1, x2, y2, each 0..1) so they
@@ -71,12 +71,15 @@ ROIS_43 = {
     "floor":  (0.313, 0.542, 0.688, 0.646),
     "corner": (0.422, 0.250, 0.578, 0.292),
 }
+# Wide defaults sit further out and are taller than the 4:3 ones: a wide lens puts the
+# side walls near the edges of the frame. Starting point only - set them on the real
+# track with:  python3 tune_rois.py --round 2
 ROIS_WIDE = {
-    "left":   (0.000, 0.365, 0.500, 0.552),
-    "right":  (0.500, 0.365, 1.000, 0.552),
-    "pillar": (0.000, 0.250, 1.000, 0.719),
-    "floor":  (0.359, 0.542, 0.641, 0.646),
-    "corner": (0.441, 0.250, 0.559, 0.292),
+    "left":   (0.00, 0.36, 0.34, 0.58),
+    "right":  (0.66, 0.36, 1.00, 0.58),
+    "pillar": (0.00, 0.20, 1.00, 0.72),
+    "floor":  (0.33, 0.62, 0.67, 0.80),
+    "corner": (0.44, 0.24, 0.56, 0.30),
 }
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
@@ -233,7 +236,7 @@ def main():
 
     FRAME_H, FRAME_W = probe.shape[:2]
     wide = is_wide(FRAME_W, FRAME_H)
-    rois = ROIS_WIDE if wide else ROIS_43
+    rois = apply_roi_config(ROIS_WIDE if wide else ROIS_43, wide)
     targets = TARGETS_WIDE if wide else TARGETS_43
     ROI_LEFT = roi_px(rois["left"], FRAME_W, FRAME_H)
     ROI_RIGHT = roi_px(rois["right"], FRAME_W, FRAME_H)

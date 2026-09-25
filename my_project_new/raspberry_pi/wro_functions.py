@@ -29,6 +29,39 @@ def load_camera_config():
         return {}
 
 
+# Written by tune_rois.py. Holds ROI fractions measured on the real track, per aspect:
+#   {"wide": {"left": [x1, y1, x2, y2], ...}, "narrow": {...}}
+ROI_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roi_config.json")
+
+
+def load_roi_config(wide):
+    """ROI overrides measured on the track for this aspect, or {} if none saved."""
+    try:
+        with open(ROI_CONFIG_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    section = data.get("wide" if wide else "narrow", {})
+    out = {}
+    if isinstance(section, dict):
+        for name, box in section.items():
+            if isinstance(box, (list, tuple)) and len(box) == 4:
+                out[name] = tuple(float(v) for v in box)
+    return out
+
+
+def apply_roi_config(defaults, wide, announce=True):
+    """Merges saved ROI fractions over the built-in defaults."""
+    rois = dict(defaults)
+    saved = load_roi_config(wide)
+    if saved:
+        rois.update(saved)
+        if announce:
+            print(f"[ROI] Using measured ROIs from roi_config.json for "
+                  f"{'16:9' if wide else '4:3'}: {', '.join(sorted(saved))}")
+    return rois
+
+
 def is_wide(w, h):
     """True if this frame is 16:9 (the camera's full width) rather than a 4:3 crop."""
     return h > 0 and abs((w / float(h)) - (16.0 / 9.0)) < 0.12
@@ -73,14 +106,27 @@ class CameraManager:
                 from picamera2 import Picamera2
                 size = (1280, 720) if self.wide else (640, 480)
 
-                # Only use Picamera2 for a real CSI camera. libcamera also lists USB
-                # cameras through its uvcvideo pipeline, and driving one that way fails
-                # (no FrameDurationLimits control) while still holding /dev/videoN open,
-                # which then stops OpenCV from using it.
-                csi = [i for i, cam in enumerate(Picamera2.global_camera_info())
-                       if "uvcvideo" not in str(cam.get("Id", "")).lower()]
+                # Only use Picamera2 for a real CSI camera.
+                # libcamera also lists USB cameras through its uvcvideo pipeline, and
+                # driving one that way delivers RGB where a CSI sensor delivers BGR - so
+                # every colour comes out with red and blue swapped. It can also hold
+                # /dev/videoN open and lock OpenCV out.
+                # A USB camera's Id is its USB path, e.g.
+                #   /base/axi/pcie@1000120000/rp1/usb@300000-1:1.0-1bd0:2282
+                # while a CSI sensor sits on i2c, e.g. .../i2c@88000/imx708@1a
+                infos = Picamera2.global_camera_info()
+
+                def looks_like_csi(cam):
+                    ident = f"{cam.get('Id', '')} {cam.get('Model', '')}".lower()
+                    return not any(tag in ident for tag in ("usb", "uvc", "video4linux"))
+
+                csi = [i for i, cam in enumerate(infos) if looks_like_csi(cam)]
+                if infos:
+                    print("[INFO] libcamera sees: "
+                          + ", ".join(f"{c.get('Model', '?')} ({'CSI' if looks_like_csi(c) else 'USB'})"
+                                      for c in infos))
                 if not csi:
-                    raise RuntimeError("libcamera only sees USB cameras; OpenCV handles those better")
+                    raise RuntimeError("no CSI camera; USB cameras are handled better by OpenCV")
 
                 print(f"[INFO] Initializing Picamera2 (Pi CSI Camera) at {size[0]}x{size[1]}...")
                 self.picam2 = Picamera2(csi[0])

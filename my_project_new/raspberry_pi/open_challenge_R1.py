@@ -37,7 +37,7 @@ import cv2
 from wro_serial import WROSerialController, Drive
 from wro_functions import (CameraManager, FpsCounter, roi_hsv_lab, wall_mask, orange_mask, blue_mask,
                            contours_of, max_contour, draw_roi, draw_offset_contours,
-                           wait_for_button_press, roi_px, area_norm, is_wide)
+                           wait_for_button_press, roi_px, area_norm, is_wide, apply_roi_config)
 
 # ============================================================================ tuning
 # Camera regions, stored as FRACTIONS of the frame (x1, y1, x2, y2, each 0..1) so they
@@ -57,10 +57,13 @@ ROIS_43 = {
     "right": (0.625, 0.354, 0.969, 0.458),
     "line":  (0.313, 0.625, 0.688, 0.729),
 }
+# Wide defaults sit further out and are taller than the 4:3 ones: a wide lens puts the
+# side walls near the edges of the frame. These are a starting point only - set them on
+# the real track with:  python3 tune_rois.py
 ROIS_WIDE = {
-    "left":  (0.148, 0.354, 0.406, 0.458),
-    "right": (0.594, 0.354, 0.852, 0.458),
-    "line":  (0.359, 0.625, 0.641, 0.729),
+    "left":  (0.02, 0.42, 0.32, 0.58),
+    "right": (0.68, 0.42, 0.98, 0.58),
+    "line":  (0.33, 0.70, 0.67, 0.86),
 }
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
@@ -158,7 +161,7 @@ def main():
 
     FRAME_H, FRAME_W = probe.shape[:2]
     wide = is_wide(FRAME_W, FRAME_H)
-    rois = ROIS_WIDE if wide else ROIS_43
+    rois = apply_roi_config(ROIS_WIDE if wide else ROIS_43, wide)
     ROI_LEFT = roi_px(rois["left"], FRAME_W, FRAME_H)
     ROI_RIGHT = roi_px(rois["right"], FRAME_W, FRAME_H)
     ROI_LINE = roi_px(rois["line"], FRAME_W, FRAME_H)
