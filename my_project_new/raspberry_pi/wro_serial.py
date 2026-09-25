@@ -18,6 +18,7 @@ Built so a link problem can never freeze or end a run:
 """
 
 import glob
+import os
 import sys
 import threading
 import time
@@ -49,7 +50,8 @@ class WROSerialController:
         "AUTO_US_ON", "AUTO_US_OFF", "TURN_LEFT", "TURN_RIGHT"
     }
 
-    HEARTBEAT_TIMEOUT = 1.5  # s without any line from the ESP32 -> link considered unhealthy
+    HEARTBEAT_TIMEOUT = 1.5     # s without any line from the ESP32 -> link considered unhealthy
+    MAX_SOFT_READ_ERRORS = 25   # transient read glitches in a row before actually reconnecting
 
     def __init__(self, port: Optional[str] = None, baudrate: int = 115200, timeout: float = 0.05,
                  auto_connect: bool = True, verbose: bool = False):
@@ -76,7 +78,9 @@ class WROSerialController:
         self._last_boot_log = 0.0
         self.stats = {"disconnects": 0, "reconnects": 0, "esp_reboots": 0,
                       "failsafe_stops": 0, "dropped_writes": 0, "last_reset_reason": None,
-                      "us_lines": 0}
+                      "us_lines": 0, "read_glitches": 0}
+        self._soft_read_errors = 0
+        self._last_glitch_log = 0.0
 
         if auto_connect:
             self.connect()
@@ -269,16 +273,30 @@ class WROSerialController:
 
             was_connected = True
             ser = self.serial_conn
+
+            # Only ever read when bytes are actually waiting. A blocking read on an idle
+            # port makes CH340 adapters raise "device reports readiness to read but
+            # returned no data", which used to be treated as a disconnect - dozens of
+            # needless close/reopen cycles per run, losing most of the telemetry.
             try:
-                chunk = ser.read(ser.in_waiting or 1)
+                waiting = ser.in_waiting
             except (serial.SerialException, OSError, TypeError, AttributeError) as e:
-                if self._running:
-                    _log(f"Read failed ({e})")
-                self._need_reopen = True
+                self._read_fault(e)
+                continue
+
+            if not waiting:
+                time.sleep(0.005)
+                continue
+
+            try:
+                chunk = ser.read(waiting)
+            except (serial.SerialException, OSError, TypeError, AttributeError) as e:
+                self._read_fault(e)
                 continue
 
             if not chunk:
                 continue
+            self._soft_read_errors = 0
             buf += chunk
             while b"\n" in buf:
                 raw, buf = buf.split(b"\n", 1)
@@ -287,6 +305,39 @@ class WROSerialController:
                     self._handle_line(line)
             if len(buf) > 512:  # garbage without newlines
                 buf = b""
+
+    def _read_fault(self, err):
+        """
+        Decides whether a read error means the device really went away, or is just a
+        transient glitch. USB-serial adapters (CH340 especially) occasionally report the
+        port as readable and then return nothing; reconnecting on those is what caused
+        the disconnect storms. Only a vanished device, or many glitches in a row,
+        triggers a reconnect.
+        """
+        text = str(err)
+        device_gone = ("errno 5" in text.lower() or "input/output error" in text.lower()
+                       or "no such file" in text.lower()
+                       or (self.port and self.port.startswith("/dev/") and not os.path.exists(self.port)))
+
+        if device_gone:
+            if self._running:
+                _log(f"Read failed, device is gone ({err})")
+            self._need_reopen = True
+            self._soft_read_errors = 0
+            return
+
+        self._soft_read_errors += 1
+        self.stats["read_glitches"] += 1
+        now = time.time()
+        if now - self._last_glitch_log > 10.0:
+            self._last_glitch_log = now
+            _log(f"Transient read glitch, keeping the port open "
+                 f"({self.stats['read_glitches']} so far): {err}")
+        if self._soft_read_errors >= self.MAX_SOFT_READ_ERRORS:
+            _log(f"{self._soft_read_errors} read glitches in a row - reconnecting")
+            self._need_reopen = True
+            self._soft_read_errors = 0
+        time.sleep(0.02)
 
     def _handle_line(self, line: str):
         self.last_rx_time = time.time()

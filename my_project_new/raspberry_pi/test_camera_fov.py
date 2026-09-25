@@ -153,8 +153,8 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     print(f"\nCapturing one frame per mode into {args.outdir}/ "
           f"({'MJPG' if args.mjpg else 'raw format'})")
-    print(f"\n  {'requested':>12s}  {'actual':>11s}  {'aspect':>6s}  file")
-    print("  " + "-" * 62)
+    print(f"\n  {'requested':>12s}  {'actual':>11s}  {'aspect':>6s}  {'format':>6s}  file")
+    print("  " + "-" * 70)
 
     results = []
     for w, h, note in PROBE_MODES:
@@ -169,6 +169,12 @@ def main():
                 frame = f
         aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        try:
+            code = int(cap.get(cv2.CAP_PROP_FOURCC))
+            pixfmt = "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4)).strip() or "?"
+            pixfmt = "".join(c for c in pixfmt if c.isprintable())
+        except Exception:
+            pixfmt = "?"
         cap.release()
 
         if frame is None:
@@ -181,7 +187,10 @@ def main():
         ratio = aw_real / ah_real
         label = "16:9" if abs(ratio - 16 / 9) < 0.05 else "4:3" if abs(ratio - 4 / 3) < 0.05 else f"{ratio:.2f}"
         flag = "" if (aw_real, ah_real) == (w, h) else "   <- camera gave a different size"
-        print(f"  {f'{w}x{h}':>12s}  {f'{aw_real}x{ah_real}':>11s}  {label:>6s}  {os.path.basename(path)}{flag}")
+        if pixfmt.upper().startswith("RGB"):
+            flag += "   <- raw RGB: colours look blue unless swapped"
+        print(f"  {f'{w}x{h}':>12s}  {f'{aw_real}x{ah_real}':>11s}  {label:>6s}  {pixfmt:>6s}  "
+              f"{os.path.basename(path)}{flag}")
         results.append((aw_real, ah_real, label, note))
 
     widest_43 = max((r for r in results if r[2] == "4:3"), key=lambda r: r[0], default=None)

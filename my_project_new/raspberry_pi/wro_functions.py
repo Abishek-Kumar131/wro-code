@@ -35,17 +35,20 @@ class CameraManager:
     MODES_WIDE = [(848, 480), (960, 540), (1280, 720), (640, 360)]
     MODES_43 = [(640, 480), (800, 600), (320, 240)]
 
-    def __init__(self, force_webcam=False, device_index=0, wide=True, max_width=960):
+    def __init__(self, force_webcam=False, device_index=0, wide=True, max_width=960, swap_rb=None):
         self.force_webcam = force_webcam
         self.device_index = device_index
         self.wide = wide
         self.max_width = max_width
+        self.swap_rb = swap_rb      # None = decide from the camera's pixel format
         self.cap = None
         self.picam2 = None
         self.is_webcam = False
         self.width = 0
         self.height = 0
+        self.fourcc = "?"
         self._resize_to = None      # (w, h) when the captured frame must be downscaled
+        self._swap_rb = bool(swap_rb)
 
     def start(self):
         if self.force_webcam:
@@ -105,6 +108,16 @@ class CameraManager:
             self.width, self.height = w, h
             print(f"[CAMERA] Capturing {w}x{h}")
 
+        # Everything downstream assumes OpenCV's usual BGR order. Most webcam formats
+        # (MJPG, YUYV) are converted to BGR for us, but a camera handing over raw RGB
+        # is passed straight through - which makes the whole image look blue.
+        if self.swap_rb is None:
+            self._swap_rb = self.fourcc.upper().startswith("RGB")
+        if self._swap_rb:
+            print(f"[CAMERA] Pixel format {self.fourcc}: swapping red/blue so colours are correct")
+        elif self.is_webcam:
+            print(f"[CAMERA] Pixel format {self.fourcc}")
+
         if self.wide and not is_wide(self.width, self.height):
             print("[CAMERA WARNING] Asked for a 16:9 mode but got "
                   f"{self.width}x{self.height}. This camera is cropping the sides off the "
@@ -131,6 +144,18 @@ class CameraManager:
             cap.release()
             return None, None
         return cap, frame
+
+    @staticmethod
+    def _fourcc_of(cap):
+        """The pixel format the camera actually gave us, e.g. MJPG, YUYV, RGB3."""
+        try:
+            code = int(cap.get(cv2.CAP_PROP_FOURCC))
+        except Exception:
+            return "?"
+        if not code:
+            return "?"
+        text = "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4))
+        return "".join(c for c in text if c.isprintable()).strip() or "?"
 
     def _start_webcam(self):
         try:                                   # keep OpenCV's per-attempt warnings quiet
@@ -163,25 +188,28 @@ class CameraManager:
                     if cap is None:
                         continue
                     fh, fw = frame.shape[:2]
+                    fourcc = self._fourcc_of(cap)
                     if (not self.wide) or is_wide(fw, fh):
                         print(f"[SUCCESS] USB Webcam on index {idx} (/dev/video{idx}), "
-                              f"asked {w}x{h}, got {fw}x{fh}")
+                              f"asked {w}x{h}, got {fw}x{fh} in {fourcc}")
                         self.cap = cap
                         self.device_index = idx
                         self.is_webcam = True
+                        self.fourcc = fourcc
                         self._note_size(frame)
                         return
                     if fallback is None:
-                        fallback = (idx, cap, frame)     # keep it in case nothing is 16:9
+                        fallback = (idx, cap, frame, fourcc)   # keep in case nothing is 16:9
                     else:
                         cap.release()
 
         if fallback is not None:
-            idx, cap, frame = fallback
+            idx, cap, frame, fourcc = fallback
             print(f"[WARNING] No 16:9 mode worked on this camera; using what it gave instead.")
             self.cap = cap
             self.device_index = idx
             self.is_webcam = True
+            self.fourcc = fourcc
             self._note_size(frame)
             return
 
@@ -206,8 +234,11 @@ class CameraManager:
         else:
             frame = self.picam2.capture_array()
 
-        if frame is not None and self._resize_to is not None:
-            frame = cv2.resize(frame, self._resize_to, interpolation=cv2.INTER_AREA)
+        if frame is not None:
+            if self._swap_rb:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            if self._resize_to is not None:
+                frame = cv2.resize(frame, self._resize_to, interpolation=cv2.INTER_AREA)
         return frame
 
     def stop(self):

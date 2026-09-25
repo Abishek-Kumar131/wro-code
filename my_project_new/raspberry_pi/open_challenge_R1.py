@@ -135,6 +135,10 @@ def parse_args():
     p.add_argument("--steer-only", action="store_true", help="motor off; steering still reacts")
     p.add_argument("--no-us", "--vision-walls", action="store_true", help="ignore the ultrasonics")
     p.add_argument("--narrow", action="store_true", help="capture 4:3 instead of full-width 16:9")
+    p.add_argument("--swap-rb", dest="swap_rb", action="store_true", default=None,
+                   help="force a red/blue swap (use if the picture looks blue)")
+    p.add_argument("--no-swap-rb", dest="swap_rb", action="store_false",
+                   help="never swap red/blue, even if the pixel format suggests it")
     args, unknown = p.parse_known_args()
     if unknown:
         print(f"[CONFIG] Ignoring old/unknown arguments: {unknown}")
@@ -169,7 +173,7 @@ def main():
             print(f"[DISPLAY] No window available ({e}); continuing without display.")
             show = False
 
-    camera = CameraManager(force_webcam=args.webcam, wide=not args.narrow)
+    camera = CameraManager(force_webcam=args.webcam, wide=not args.narrow, swap_rb=args.swap_rb)
     camera.start()
     probe = None
     for _ in range(15):            # let auto-exposure settle, and learn the frame size
