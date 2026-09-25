@@ -60,15 +60,17 @@ const int servo_res = 14;     // 14-bit resolution (0 - 16383)
 #define RIGHT_TRIGGER 5
 #define RIGHT_ECHO  18
 
-#define MAX_DISTANCE 400
+// 200 cm is more than enough on a 3 m track and caps one ping at ~11 ms of blocking
+// (400 cm made every ping block up to ~23 ms).
+#define MAX_DISTANCE 200
 
-NewPing sonar1(FRONT_TRIGGER, FRONT_ECHO, MAX_DISTANCE); 
-NewPing sonar5(FRONT1_TRIGGER, FRONT1_ECHO, MAX_DISTANCE); 
-NewPing sonar6(FRONT2_TRIGGER, FRONT2_ECHO, MAX_DISTANCE); 
+NewPing sonar1(FRONT_TRIGGER, FRONT_ECHO, MAX_DISTANCE);
+NewPing sonar5(FRONT1_TRIGGER, FRONT1_ECHO, MAX_DISTANCE);
+NewPing sonar6(FRONT2_TRIGGER, FRONT2_ECHO, MAX_DISTANCE);
 
-NewPing sonar2(BACK_TRIGGER, BACK_ECHO, MAX_DISTANCE); 
+NewPing sonar2(BACK_TRIGGER, BACK_ECHO, MAX_DISTANCE);
 NewPing sonar3(LEFT_TRIGGER, LEFT_ECHO, MAX_DISTANCE);
-NewPing sonar4(RIGHT_TRIGGER, RIGHT_ECHO, MAX_DISTANCE); 
+NewPing sonar4(RIGHT_TRIGGER, RIGHT_ECHO, MAX_DISTANCE);
 
 
 
@@ -182,28 +184,39 @@ void execute_drive(int speed, int angle) {
 
 
 
-// UltraSonic Function
+// ########### Ultrasonic round-robin ###################################################
+// One sensor per call, at most one ping every PING_INTERVAL ms. All six refresh in
+// ~120 ms. The order alternates front/side/back so that two sensors pointing in similar
+// directions never fire back to back, which is what caused ghost echoes before.
 
-void US_Values(int &f, int &f1, int &f2, int &b, int &l, int &r)
-{
-  unsigned int front_us = sonar1.ping_cm();
-  unsigned int front1_us = sonar5.ping_cm();
-  unsigned int front2_us = sonar6.ping_cm();
-  unsigned int back_us = sonar2.ping_cm(); 
-  unsigned int left_us = sonar3.ping_cm(); 
-  unsigned int right_us = sonar4.ping_cm(); 
+extern int f_us, f1_us, f2_us, b_us, l_us, r_us;
 
-  f = front_us;
-  f1 = front1_us;
-  f2 = front2_us;
-  b = back_us;
-  l = left_us;
-  r = right_us;
+const unsigned long PING_INTERVAL = 20;   // ms between pings
+unsigned long lastPingTime = 0;
+int pingIndex = 0;
+
+void updateUltrasonics() {
+  if (millis() - lastPingTime < PING_INTERVAL) return;
+  lastPingTime = millis();
+
+  switch (pingIndex) {
+    case 0: f_us  = sonar1.ping_cm(); break;   // front
+    case 1: l_us  = sonar3.ping_cm(); break;   // left
+    case 2: f1_us = sonar5.ping_cm(); break;   // front-left
+    case 3: r_us  = sonar4.ping_cm(); break;   // right
+    case 4: f2_us = sonar6.ping_cm(); break;   // front-right
+    case 5: b_us  = sonar2.ping_cm(); break;   // back
+  }
+  pingIndex = (pingIndex + 1) % 6;
 }
 
 // ########### Setup ############################################################################################################ //
 void setup() {
   Serial.begin(115200);
+
+  //######### Radios off (WRO rule 11.10: no wireless during rounds) #########//
+  WiFi.mode(WIFI_OFF);
+  btStop();
 
   //######### RGB Led Setup #########//
   FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, NUM_LEDS);
@@ -232,11 +245,11 @@ void setup() {
   ledcAttachPin(SERVO_PIN, servo_chan);
 #endif
 
-  // Quick diagnostic wiggle on boot to visually confirm servo hardware operation
-  moveServoTo(servo_center - 20);
-  delay(250);
-  moveServoTo(servo_center + 20);
-  delay(250);
+  // No boot wiggle: if the ESP32 ever resets mid-run, the wheels must not jerk
   moveServoTo(servo_center);
-  delay(250);
+
+  rgb_led(0, 0, 255); // Blue: idle, waiting for Pi commands
+  Serial.print("BOOT:READY:");
+  Serial.println(resetReasonName(esp_reset_reason()));
+  lastHeartbeatTime = millis();
 }

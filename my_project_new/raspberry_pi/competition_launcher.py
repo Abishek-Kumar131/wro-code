@@ -1,132 +1,37 @@
 #!/usr/bin/env python3
 """
 ROBOVANGUARD - WRO Future Engineers 2026
-Raspberry Pi 5 Competition Launcher Script
+Raspberry Pi 5 competition launcher (run at boot by wro_autostart.service).
 
-Runs on Pi 5 boot:
-- Listens on GPIO 17 for physical push button press.
-- Ignores stdin EOF when running as background systemd service.
-- Launches Round 1 Open Challenge code (open_challenge_R1.py) automatically when button is pressed!
+Starts the challenge script immediately. The script loads OpenCV, opens the camera and the
+ESP32 link, and THEN waits for the start button - so pressing the button starts the car
+within about half a second instead of after several seconds of start-up.
+
+  competition_launcher.py --r1 [args]   Open Challenge   (open_challenge_R1.py)
+  competition_launcher.py --r2 [args]   Obstacle Challenge (obstacle_challenge_R2.py, default)
+
+Every other argument (--pin, --active-high, --no-display, --webcam, --dir ...) is passed
+through to the challenge script.
 """
 
-import sys
 import os
-import time
 import subprocess
-import select
+import sys
 
-def wait_for_button(gpio_pin=17, active_high=False):
-    print("=" * 65)
-    print("   ROBOVANGUARD WRO 2026 COMPETITION LAUNCHER")
-    print(f"   Waiting for physical push button press on GPIO {gpio_pin}...")
-    print("=" * 65)
-
-    is_interactive = sys.stdin.isatty()
-    if is_interactive:
-        print("  -> Running in interactive terminal (Press ENTER or Button to start)")
-    else:
-        print("  -> Running as background systemd service (Waiting strictly for GPIO Button)")
-
-    button_obj = None
-    try:
-        from gpiozero import Button
-        # pull_up=True -> Button wired to GND (active LOW, default for WRO buttons)
-        # pull_up=False -> Button wired to 3.3V (active HIGH)
-        pull_up = not active_high
-        button_obj = Button(gpio_pin, pull_up=pull_up, bounce_time=0.05)
-        print(f"[GPIO] gpiozero Button initialized on GPIO {gpio_pin} (pull_up={pull_up}).")
-    except Exception:
-        try:
-            import RPi.GPIO as GPIO
-            GPIO.setmode(GPIO.BCM)
-            pud = GPIO.PUD_DOWN if active_high else GPIO.PUD_UP
-            GPIO.setup(gpio_pin, GPIO.IN, pull_up_down=pud)
-            print(f"[GPIO] RPi.GPIO initialized on GPIO {gpio_pin}.")
-        except Exception as e:
-            print(f"[GPIO WARNING] GPIO library failed ({e}).")
-
-    # Initial settling delay to clear power-on transients
-    time.sleep(0.5)
-
-    # Wait for button to be released first if held down during boot
-    print("[GPIO] Verifying button state... (Release button if held down)")
-    settle_start = time.time()
-    while True:
-        is_pressed = False
-        if button_obj is not None:
-            is_pressed = button_obj.is_pressed
-        elif 'GPIO' in sys.modules:
-            import RPi.GPIO as GPIO
-            pin_val = GPIO.input(gpio_pin)
-            is_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
-
-        if not is_pressed or (time.time() - settle_start > 3.0):
-            break
-        time.sleep(0.05)
-
-    print("[GPIO] STANDBY READY! Press physical push button now...")
-
-    # Main wait loop
-    while True:
-        is_pressed = False
-        if button_obj is not None:
-            is_pressed = button_obj.is_pressed
-        elif 'GPIO' in sys.modules:
-            import RPi.GPIO as GPIO
-            pin_val = GPIO.input(gpio_pin)
-            is_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
-
-        if is_pressed:
-            # Confirm press with 80ms debounce hold
-            time.sleep(0.08)
-            confirm_pressed = False
-            if button_obj is not None:
-                confirm_pressed = button_obj.is_pressed
-            elif 'GPIO' in sys.modules:
-                import RPi.GPIO as GPIO
-                pin_val = GPIO.input(gpio_pin)
-                confirm_pressed = (pin_val == GPIO.HIGH) if active_high else (pin_val == GPIO.LOW)
-
-            if confirm_pressed:
-                print("\n[LAUNCH] PHYSICAL BUTTON PRESSED! Launching Round 2 Obstacle Challenge...")
-                return True
-
-        # Check terminal stdin ONLY if running interactively in terminal (NOT in systemd background)
-        if is_interactive:
-            if sys.stdin in select.select([sys.stdin], [], [], 0.02)[0]:
-                line = sys.stdin.readline()
-                print("\n[LAUNCH] ENTER key pressed in terminal! Launching...")
-                return True
-
-        time.sleep(0.05)
 
 def main():
-    gpio_pin = 17
-    active_high = "--active-high" in sys.argv
+    target = "open_challenge_R1.py" if "--r1" in sys.argv else "obstacle_challenge_R2.py"
+    passthrough = [a for a in sys.argv[1:] if a not in ("--r1", "--r2")]
 
-    # Round selector: default to Round 2 Obstacle Challenge (obstacle_challenge_R2.py)
-    target_script = "open_challenge_R1.py" if "--r1" in sys.argv else "obstacle_challenge_R2.py"
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), target)
+    cmd = [sys.executable, script] + passthrough
+    print(f"[LAUNCHER] Starting: {' '.join(cmd)}", flush=True)
 
-    if "--pin" in sys.argv:
-        idx = sys.argv.index("--pin")
-        if idx + 1 < len(sys.argv):
-            gpio_pin = int(sys.argv[idx + 1])
-
-    wait_for_button(gpio_pin, active_high)
-
-    # Path to target round challenge script
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    target_path = os.path.join(script_dir, target_script)
-
-    # Forward any arguments like --no-display, --webcam, or --dir
-    extra_args = [arg for arg in sys.argv[1:] if arg not in ("--pin", str(gpio_pin), "--active-high", "--r1", "--r2")]
-    cmd = [sys.executable, target_path, "--no-wait"] + extra_args
-    print(f"[EXEC] Running: {' '.join(cmd)}")
-    
     try:
-        subprocess.run(cmd)
+        sys.exit(subprocess.run(cmd).returncode)
     except KeyboardInterrupt:
         print("\n[LAUNCHER] Stopped by user.")
+
 
 if __name__ == "__main__":
     main()
