@@ -52,17 +52,36 @@ from wro_serial import WROSerialController, Drive
 from wro_functions import (CameraManager, FpsCounter, Ultrasonics, roi_hsv_lab, wall_mask,
                            orange_mask, blue_mask, red_mask, green_mask, magenta_mask,
                            contours_of, max_contour, draw_roi, draw_offset_contours,
-                           wait_for_button_press)
+                           wait_for_button_press, roi_px, area_norm, is_wide)
 
 # ============================================================================ tuning
-RED_TARGET = 110            # image x a red pillar is steered to (pass it on the right)
-GREEN_TARGET = 530          # image x a green pillar is steered to (pass it on the left)
+# Pillar targets and camera regions, stored as FRACTIONS of the frame so they follow the
+# capture resolution instead of being pinned to one frame size.
+#
+# Two sets, because a 16:9 frame shows more to the left and right than a 4:3 crop of the
+# same camera. A 4:3 crop covers the middle 75% of the 16:9 width, so an x fraction
+# converts as  x_wide = 0.125 + 0.75 * x_43 . The y fractions are identical: cropping to
+# 4:3 removes width, not height.
+#
+# Contour areas and pillar distances are normalised to "640x480 equivalent", so every
+# threshold below keeps its meaning whatever resolution the camera gives.
 
-# Camera regions [x1, y1, x2, y2] on the 640x480 frame
-ROI_LEFT = [20, 170, 240, 220]
-ROI_RIGHT = [400, 170, 620, 220]
-ROI_PILLAR = [0, 60, 640, 280]
-ROI_FLOOR = [200, 270, 440, 340]
+# where a pillar is steered to: red toward the left of the image (pass it on the right)
+TARGETS_43 = {"red": 0.172, "green": 0.828}
+TARGETS_WIDE = {"red": 0.254, "green": 0.746}
+
+ROIS_43 = {
+    "left":   (0.031, 0.354, 0.375, 0.458),
+    "right":  (0.625, 0.354, 0.969, 0.458),
+    "pillar": (0.000, 0.125, 1.000, 0.583),
+    "floor":  (0.313, 0.563, 0.688, 0.708),
+}
+ROIS_WIDE = {
+    "left":   (0.148, 0.354, 0.406, 0.458),
+    "right":  (0.594, 0.354, 0.852, 0.458),
+    "pillar": (0.000, 0.125, 1.000, 0.583),   # full width: spend the extra view on pillars
+    "floor":  (0.359, 0.563, 0.641, 0.708),
+}
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
@@ -131,7 +150,7 @@ class Pillar:
         self.dist = 1_000_000
         self.x = 0
         self.y = 0
-        self.target = GREEN_TARGET
+        self.target = 0
         self.w = 0
         self.h = 0
 
@@ -147,6 +166,7 @@ def parse_args():
     p.add_argument("--turns", type=int, default=TOTAL_TURNS, help="park after this many turns")
     p.add_argument("--steer-only", action="store_true", help="motor off; steering still reacts")
     p.add_argument("--no-us", action="store_true", help="ignore the ultrasonics")
+    p.add_argument("--narrow", action="store_true", help="capture 4:3 instead of full-width 16:9")
     args, unknown = p.parse_known_args()
     if unknown:
         print(f"[CONFIG] Ignoring old/unknown arguments: {unknown}")
@@ -157,27 +177,29 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-def find_pillar(contours, target, colour, best, end_const):
+def find_pillar(contours, target, colour, best, end_const, roi, fw, fh, area_scale):
     """
     Picks the nearest usable pillar of one colour. Pillars that have slid below
     (ROI bottom - end_const) are dropped, so a block the car has already passed stops
     pulling the steering - that drop was missing on main.
     """
     count = 0
+    sx, sy = 640.0 / fw, 480.0 / fh      # frame px -> 640x480 equivalent
+    end_px = end_const / sy
     for cnt in contours:
-        area = cv2.contourArea(cnt)
+        area = cv2.contourArea(cnt) * area_scale
         if area < PILLAR_MIN_AREA:
             continue
         x, y, w, h = cv2.boundingRect(cnt)
-        x += ROI_PILLAR[0] + w // 2
-        y += ROI_PILLAR[1] + h
-        dist = round(math.dist([x, y], [320, 480]))
+        x += roi[0] + w // 2
+        y += roi[1] + h
+        dist = round(math.dist([x * sx, y * sy], [320, 480]))
 
         if 80 < dist < PILLAR_MAX_DIST:
             count += 1
         if dist > PILLAR_MAX_DIST:
             continue
-        if y > ROI_PILLAR[3] - end_const:     # passing under the nose: stop tracking it
+        if y > roi[3] - end_px:     # passing under the nose: stop tracking it
             continue
 
         if dist < best.dist:
@@ -210,10 +232,33 @@ def main():
             print(f"[DISPLAY] No window available ({e}); continuing without display.")
             show = False
 
-    camera = CameraManager(force_webcam=args.webcam)
+    camera = CameraManager(force_webcam=args.webcam, wide=not args.narrow)
     camera.start()
-    for _ in range(15):
-        camera.capture_array()
+    probe = None
+    for _ in range(15):            # let auto-exposure settle, and learn the frame size
+        f = camera.capture_array()
+        if f is not None:
+            probe = f
+    if probe is None:
+        print("[ERROR] The camera returned no frames. Run test_camera_fov.py to check it.")
+        link.disconnect()
+        return
+
+    FRAME_H, FRAME_W = probe.shape[:2]
+    wide = is_wide(FRAME_W, FRAME_H)
+    rois = ROIS_WIDE if wide else ROIS_43
+    targets = TARGETS_WIDE if wide else TARGETS_43
+    ROI_LEFT = roi_px(rois["left"], FRAME_W, FRAME_H)
+    ROI_RIGHT = roi_px(rois["right"], FRAME_W, FRAME_H)
+    ROI_PILLAR = roi_px(rois["pillar"], FRAME_W, FRAME_H)
+    ROI_FLOOR = roi_px(rois["floor"], FRAME_W, FRAME_H)
+    RED_TARGET = int(targets["red"] * FRAME_W)
+    GREEN_TARGET = int(targets["green"] * FRAME_W)
+    AREA = area_norm(FRAME_W, FRAME_H)
+    print(f"[CAMERA] {FRAME_W}x{FRAME_H} "
+          f"({'16:9 - full sensor width' if wide else '4:3 - sides cropped off the sensor'})")
+    print(f"[ROI] left {ROI_LEFT}  right {ROI_RIGHT}  pillars {ROI_PILLAR}  floor {ROI_FLOOR}")
+    print(f"[ROI] pillar targets: red x={RED_TARGET}, green x={GREEN_TARGET}")
 
     if not args.no_wait:
         wait_for_button_press(args.pin, args.active_high, camera, show, WINDOW)
@@ -272,21 +317,22 @@ def main():
             c_red = contours_of(red_mask(hsv_p), PILLAR_MIN_AREA - 1, PILLAR_RED_MIN_ASPECT)
             c_green = contours_of(green_mask(hsv_p), PILLAR_MIN_AREA - 1, PILLAR_GREEN_MIN_ASPECT)
 
-            left_area = max_contour(c_left, ROI_LEFT)[0]
-            right_area = max_contour(c_right, ROI_RIGHT)[0]
-            orange_area = max_contour(c_orange, ROI_FLOOR)[0]
-            blue_area = max_contour(c_blue, ROI_FLOOR)[0]
+            # areas normalised to 640x480-equivalent pixels so the thresholds above hold
+            left_area = int(max_contour(c_left, ROI_LEFT)[0] * AREA)
+            right_area = int(max_contour(c_right, ROI_RIGHT)[0] * AREA)
+            orange_area = int(max_contour(c_orange, ROI_FLOOR)[0] * AREA)
+            blue_area = int(max_contour(c_blue, ROI_FLOOR)[0] * AREA)
 
             # ---------------------------------------------------------- pillars
-            probe = Pillar()
-            n_g = find_pillar(c_green, GREEN_TARGET, "green", probe, 20)
-            n_r = find_pillar(c_red, RED_TARGET, "red", probe, 20)
+            scan = Pillar()
+            n_g = find_pillar(c_green, GREEN_TARGET, "green", scan, 20, ROI_PILLAR, FRAME_W, FRAME_H, AREA)
+            n_r = find_pillar(c_red, RED_TARGET, "red", scan, 20, ROI_PILLAR, FRAME_W, FRAME_H, AREA)
             gains = "crowded" if (n_g >= 2 or n_r >= 2) else "normal"
             c_kp, c_kd, c_y, end_const = PILLAR_GAINS[gains]
 
             pillar = Pillar()
-            find_pillar(c_green, GREEN_TARGET, "green", pillar, end_const)
-            find_pillar(c_red, RED_TARGET, "red", pillar, end_const)
+            find_pillar(c_green, GREEN_TARGET, "green", pillar, end_const, ROI_PILLAR, FRAME_W, FRAME_H, AREA)
+            find_pillar(c_red, RED_TARGET, "red", pillar, end_const, ROI_PILLAR, FRAME_W, FRAME_H, AREA)
 
             # ---------------------------------------------------------- emergency reverse
             if use_us and not is_turning and now >= reverse_ready_at:
@@ -470,7 +516,7 @@ def main():
                 draw_offset_contours(disp, c_green, ROI_PILLAR, (0, 255, 0))
                 if pillar.area:
                     cv2.circle(disp, (int(pillar.x), int(pillar.y)), 6, (255, 255, 255), -1)
-                    cv2.line(disp, (pillar.target, 0), (pillar.target, 479), (255, 255, 255), 1)
+                    cv2.line(disp, (pillar.target, 0), (pillar.target, FRAME_H - 1), (255, 255, 255), 1)
                 cv2.putText(disp, f"{state} dir:{turn_dir} turns:{turns}/{args.turns} fps:{fps.fps:.0f}",
                             (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 204), 2)
                 cv2.putText(disp, f"L:{left_area} R:{right_area} P:{int(pillar.area)} ang:{angle}",

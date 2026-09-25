@@ -46,13 +46,29 @@ import cv2
 from wro_serial import WROSerialController, Drive
 from wro_functions import (CameraManager, FpsCounter, Ultrasonics, roi_hsv_lab, wall_mask,
                            orange_mask, blue_mask, contours_of, max_contour, draw_roi,
-                           draw_offset_contours, wait_for_button_press)
+                           draw_offset_contours, wait_for_button_press, roi_px, area_norm, is_wide)
 
 # ============================================================================ tuning
-# Camera regions [x1, y1, x2, y2] on the 640x480 frame
-ROI_LEFT = [20, 170, 240, 220]
-ROI_RIGHT = [400, 170, 620, 220]
-ROI_LINE = [200, 300, 440, 350]
+# Camera regions, stored as FRACTIONS of the frame (x1, y1, x2, y2, each 0..1) so they
+# follow the capture resolution instead of being pinned to one frame size.
+#
+# There are two sets because a 16:9 frame shows more to the left and right than a 4:3
+# crop of the same camera. A 4:3 crop covers the middle 75% of the 16:9 width, so an x
+# fraction converts as  x_wide = 0.125 + 0.75 * x_43 . The y fractions are identical:
+# cropping to 4:3 removes width, not height.
+#
+# Contour areas are normalised to "640x480 equivalent pixels", so every area threshold
+# below keeps its meaning whatever resolution the camera gives.
+ROIS_43 = {
+    "left":  (0.031, 0.354, 0.375, 0.458),
+    "right": (0.625, 0.354, 0.969, 0.458),
+    "line":  (0.313, 0.625, 0.688, 0.729),
+}
+ROIS_WIDE = {
+    "left":  (0.148, 0.354, 0.406, 0.458),
+    "right": (0.594, 0.354, 0.852, 0.458),
+    "line":  (0.359, 0.625, 0.641, 0.729),
+}
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
@@ -118,6 +134,7 @@ def parse_args():
     p.add_argument("--turns", type=int, default=TOTAL_TURNS, help="stop after this many turns")
     p.add_argument("--steer-only", action="store_true", help="motor off; steering still reacts")
     p.add_argument("--no-us", "--vision-walls", action="store_true", help="ignore the ultrasonics")
+    p.add_argument("--narrow", action="store_true", help="capture 4:3 instead of full-width 16:9")
     args, unknown = p.parse_known_args()
     if unknown:
         print(f"[CONFIG] Ignoring old/unknown arguments: {unknown}")
@@ -152,10 +169,28 @@ def main():
             print(f"[DISPLAY] No window available ({e}); continuing without display.")
             show = False
 
-    camera = CameraManager(force_webcam=args.webcam)
+    camera = CameraManager(force_webcam=args.webcam, wide=not args.narrow)
     camera.start()
-    for _ in range(15):
-        camera.capture_array()
+    probe = None
+    for _ in range(15):            # let auto-exposure settle, and learn the frame size
+        f = camera.capture_array()
+        if f is not None:
+            probe = f
+    if probe is None:
+        print("[ERROR] The camera returned no frames. Run test_camera_fov.py to check it.")
+        link.disconnect()
+        return
+
+    FRAME_H, FRAME_W = probe.shape[:2]
+    wide = is_wide(FRAME_W, FRAME_H)
+    rois = ROIS_WIDE if wide else ROIS_43
+    ROI_LEFT = roi_px(rois["left"], FRAME_W, FRAME_H)
+    ROI_RIGHT = roi_px(rois["right"], FRAME_W, FRAME_H)
+    ROI_LINE = roi_px(rois["line"], FRAME_W, FRAME_H)
+    AREA = area_norm(FRAME_W, FRAME_H)
+    print(f"[CAMERA] {FRAME_W}x{FRAME_H} "
+          f"({'16:9 - full sensor width' if wide else '4:3 - sides cropped off the sensor'})")
+    print(f"[ROI] left {ROI_LEFT}  right {ROI_RIGHT}  line {ROI_LINE}")
 
     if not args.no_wait:
         wait_for_button_press(args.pin, args.active_high, camera, show, WINDOW)
@@ -205,10 +240,11 @@ def main():
             c_orange = contours_of(orange_mask(hsv, lab), LINE_MIN_AREA)
             c_blue = contours_of(blue_mask(hsv, lab), LINE_MIN_AREA)
 
-            left_area = max_contour(c_left, ROI_LEFT)[0]
-            right_area = max_contour(c_right, ROI_RIGHT)[0]
-            orange_area = max_contour(c_orange, ROI_LINE)[0]
-            blue_area = max_contour(c_blue, ROI_LINE)[0]
+            # areas normalised to 640x480-equivalent pixels so the thresholds above hold
+            left_area = int(max_contour(c_left, ROI_LEFT)[0] * AREA)
+            right_area = int(max_contour(c_right, ROI_RIGHT)[0] * AREA)
+            orange_area = int(max_contour(c_orange, ROI_LINE)[0] * AREA)
+            blue_area = int(max_contour(c_blue, ROI_LINE)[0] * AREA)
 
             # ---------------------------------------------------------- emergency reverse
             if use_us and not returning_home and not is_turning and now >= reverse_ready_at:
