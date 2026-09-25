@@ -70,7 +70,8 @@ SERVO_MIN, SERVO_MAX = 75, 125
 KP = 0.02               # Canada: 0.02
 KD = 0.006              # Canada: 0.006
 STRAIGHT_LIMIT = 15     # max steering offset from centre on straights
-TURN_DEVIATION = 15     # minimum steering offset while turning (PD may use the full 25)
+TURN_DEVIATION = 25     # steering offset in a corner. 25 = full lock (the mechanical
+                        # limit). Lower it if corners are too sharp and the car cuts in.
 
 # Turns
 TURN_THRESH = 150       # wall area at or below this: that wall has ended, start turning
