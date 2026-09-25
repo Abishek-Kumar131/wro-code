@@ -60,16 +60,17 @@ ROI_CORNER = [270, 120, 370, 140]           # switched on near corners only
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
-SHARP_LEFT, SHARP_RIGHT = 60, 140
+# Mechanical steering range of this car: 100 = straight, 75 = full left, 125 = full right
+SHARP_LEFT, SHARP_RIGHT = 75, 125
 KP, KD = 0.015, 0.01                        # wall PD (no pillar)
 PILLAR_GAINS = {"normal": (0.25, 0.25, 0.08, 40),     # (kp, kd, cy, end_const)
                 "crowded": (0.20, 0.20, 0.05, 70)}    # 2+ pillars of one colour (inside corner)
-PARKING_END_CONST = 30
 MAX_DIST = 370              # pillars farther than this (px from bottom centre) are ignored
 
 # Pillar size filters (contour area, px)
-RED_MIN_AREA, RED_MIN_AREA_PARKING = 150, 100
-GREEN_MIN_AREA, GREEN_MIN_AREA_PARKING = 200, 300
+RED_MIN_AREA = 150
+GREEN_MIN_AREA = 200
+PILLAR_PREFILTER_AREA = 100
 RED_TOO_CLOSE, GREEN_TOO_CLOSE = 6500, 8000     # reverse if a pillar this big is right ahead
 RED_SKIP_WALL, GREEN_SKIP_WALL = 11500, 12000   # ignore pillars while a wall fills its ROI this much
 
@@ -80,17 +81,17 @@ CORNER_AREA = {"left": 1000, "right": 1250}     # corner ROI area that forces a 
 TURN_LINE_COOLDOWN = 1.0    # s after a counted turn during which the turn line is ignored
 TOTAL_TURNS = 12
 
-# Parking
-LOT_AVOID_AREA = 5000       # magenta this big in a side ROI during the laps -> steer away
-PARK_LEFT_MIN_Y, PARK_LEFT_MIN_AREA = 220, 650
-PARK_RIGHT_MIN_Y, PARK_RIGHT_MIN_AREA = 240, 600
-FRONT_WALL_STOP_AREA = 3500     # black in the floor ROI this big while parking -> final stop
-FINAL_PARK_DRIVE = 1.5          # s driven after that before stopping (Canada: 1.5 s)
-PARK_SEARCH_TIMEOUT = 15.0      # s on the parking lap without finding the lot -> stop anyway
+# Parking lot: only avoided, never entered (touching its limitations ends the round, rule 9.24.7)
+LOT_AVOID_AREA = 5000       # magenta this big in a side ROI -> steer away from the lot
+
+# Finish: after the last corner, stop in the start section (same as the open challenge)
+FINISH_DELAY = {"left": 1.0, "right": 1.5, "none": 1.25}
+FINISH_STRAIGHT_TOL = 10    # steering must be within this of centre to start the finish timer
+FINISH_MAX_WAIT = 3.0       # if it never settles that straight, stop anyway this long after the last turn
+BRAKE_SPEED = -180
 
 # Speed (PWM 0-255). This motor stalls below ~220.
 SPEED = 225
-PARK_SPEED = 220
 REVERSE_SPEED = -230
 REVERSE_COOLDOWN = 1.0
 START_DELAY = 0.5
@@ -119,8 +120,6 @@ def parse_args():
     p.add_argument("--dir", choices=["left", "right"], help="force track direction")
     p.add_argument("--turns", type=int, default=TOTAL_TURNS, help="start parking after this many turns")
     p.add_argument("--steer-only", action="store_true", help="motor off; steering still reacts")
-    p.add_argument("--parking-left", action="store_true", help="test: parking lap now, lot on the left")
-    p.add_argument("--parking-right", action="store_true", help="test: parking lap now, lot on the right")
     args, unknown = p.parse_known_args()
     if unknown:
         print(f"[CONFIG] Ignoring old/unknown arguments: {unknown}")
@@ -137,10 +136,10 @@ def find_pillar(contours, target, colour, best, roi, ctx):
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if colour == "red":
-            if area <= (RED_MIN_AREA_PARKING if ctx["parking"] else RED_MIN_AREA):
+            if area <= RED_MIN_AREA:
                 continue
         else:
-            if area <= (GREEN_MIN_AREA_PARKING if ctx["parking"] else GREEN_MIN_AREA):
+            if area <= GREEN_MIN_AREA:
                 continue
 
         x, y, w, h = cv2.boundingRect(cnt)
@@ -151,7 +150,7 @@ def find_pillar(contours, target, colour, best, roi, ctx):
         if 160 < dist < 380:
             count += 1
 
-        if not ctx["parking"]:
+        if True:
             limit, in_path = (RED_TOO_CLOSE, x >= 220) if colour == "red" else (GREEN_TOO_CLOSE, x <= 420)
             if area > limit and in_path:
                 too_close = max(too_close, int(area))
@@ -211,18 +210,11 @@ def main():
     error = 0
     angle = SERVO_CENTER
 
-    temp_parking = False
-    parking_l = parking_r = False
-    parking_lap_start = None
+    finish_at = None
+    last_turn_time = 0.0
     reverse_ready_at = 0.0
     link_was_ok = True
     exit_reason = "unknown"
-
-    if args.parking_left or args.parking_right:
-        t = args.turns
-        turn_dir = "right" if args.parking_left else "left"   # lot on the outer wall
-        roi_pillar[1] = 140
-        print(f"[TEST] Parking lap from the start, lot on the {'LEFT' if args.parking_left else 'RIGHT'}")
 
     if not args.no_wait:
         wait_for_button_press(args.pin, args.active_high, camera, show, WINDOW)
@@ -256,12 +248,9 @@ def main():
             mag_r = magenta_mask(lab_r)
             wall_l = wall_mask(hsv_l, lab_l)
             wall_r = wall_mask(hsv_r, lab_r)
-            if temp_parking:     # let the car approach the lot: magenta is not wall
-                wall_l = cv2.bitwise_and(wall_l, cv2.bitwise_not(mag_l))
-                wall_r = cv2.bitwise_and(wall_r, cv2.bitwise_not(mag_r))
-            else:                # during the laps: stay away from the lot
-                wall_l = cv2.bitwise_or(wall_l, mag_l)
-                wall_r = cv2.bitwise_or(wall_r, mag_r)
+            # magenta counts as wall so the car steers around the parking lot, never into it
+            wall_l = cv2.bitwise_or(wall_l, mag_l)
+            wall_r = cv2.bitwise_or(wall_r, mag_r)
             c_left = contours_of(wall_l, 100)
             c_right = contours_of(wall_r, 100)
             left_area = max_contour(c_left, ROI_LEFT)[0]
@@ -271,13 +260,12 @@ def main():
 
             hsv_f, lab_f = roi_hsv_lab(img, roi_floor)
             front_area = max_contour(contours_of(wall_mask(hsv_f, lab_f), 100), roi_floor)[0]
-            lot_front = max_contour(contours_of(magenta_mask(lab_f), 100), roi_floor)
             orange_area = max_contour(contours_of(orange_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0]
             blue_area = max_contour(contours_of(blue_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0]
 
             hsv_p, _ = roi_hsv_lab(img, roi_pillar)
-            c_red = contours_of(red_mask(hsv_p), RED_MIN_AREA_PARKING, PILLAR_RED_MIN_ASPECT)
-            c_green = contours_of(green_mask(hsv_p), RED_MIN_AREA_PARKING, PILLAR_GREEN_MIN_ASPECT)
+            c_red = contours_of(red_mask(hsv_p), PILLAR_PREFILTER_AREA, PILLAR_RED_MIN_ASPECT)
+            c_green = contours_of(green_mask(hsv_p), PILLAR_PREFILTER_AREA, PILLAR_GREEN_MIN_ASPECT)
 
             corner_area = 0
             if corner_on:
@@ -286,15 +274,13 @@ def main():
                                + max_contour(contours_of(magenta_mask(lab_c), 50), ROI_CORNER)[0])
 
             # ---------------------------------------------------------- pillars
-            ctx = {"parking": temp_parking, "left_area": left_area, "right_area": right_area}
+            ctx = {"left_area": left_area, "right_area": right_area}
             probe = Pillar()
             # choose gains from how many pillars of one colour are in view
             n_g, _ = find_pillar(c_green, green_target, "green", probe, roi_pillar, dict(ctx, end_const=40))
             n_r, _ = find_pillar(c_red, red_target, "red", probe, roi_pillar, dict(ctx, end_const=40))
             gains = "crowded" if (n_g >= 2 or n_r >= 2) else "normal"
             c_kp, c_kd, c_y, end_const = PILLAR_GAINS[gains]
-            if temp_parking and gains == "normal":
-                end_const = PARKING_END_CONST
             ctx["end_const"] = end_const
 
             pillar = Pillar()
@@ -326,79 +312,21 @@ def main():
                     r_turn = True
                 else:
                     l_turn = True
-                if temp_parking or (pillar.area != 0 and (
-                        (left_area > 500 and turn_dir == "left") or (right_area > 500 and turn_dir == "right"))):
+                if pillar.area != 0 and (
+                        (left_area > 500 and turn_dir == "left") or (right_area > 500 and turn_dir == "right")):
                     corner_on = True
 
             def end_turn(method):
-                nonlocal l_turn, r_turn, t, prev_error, prev_diff, line_cooldown_until
+                nonlocal l_turn, r_turn, t, prev_error, prev_diff, line_cooldown_until, last_turn_time
                 l_turn = r_turn = False
                 prev_error = prev_diff = 0
                 t += 1
+                last_turn_time = now
                 line_cooldown_until = now + TURN_LINE_COOLDOWN
                 print(f"[TURN] {t}/{args.turns} done ({method}) at {now - t_start:.1f}s")
 
-            # ---------------------------------------------------------- parking lap entry
-            if t >= args.turns and not temp_parking and (
-                    (left_area > 2000 and right_area > 2000 and pillar.area < 1000) or pillar.area < 400
-                    or t >= args.turns + 1):
-                # pass every pillar on the outside so the car stays near the outer wall (the lot)
-                if turn_dir == "right":
-                    red_target = green_target = GREEN_TARGET
-                else:
-                    red_target = green_target = RED_TARGET
-                roi_pillar[1] = 140
-                temp_parking = True
-                parking_lap_start = now
-                print("[PARKING] Laps complete -> searching for the parking lot")
-
-            # ---------------------------------------------------------- parking
-            if temp_parking:
-                if not (parking_l or parking_r):
-                    if lot_left[2] >= PARK_LEFT_MIN_Y and lot_left[0] > PARK_LEFT_MIN_AREA:
-                        parking_l = True
-                        print(f"[PARKING] Lot on the LEFT (area {lot_left[0]})")
-                        speed = PARK_SPEED
-                        if lot_left[0] > 1800:     # lot already large: drive on before turning in
-                            hold(PARK_SPEED, angle, max(lot_left[0] / 2500 - 1, 0))
-                        roi_floor = [220, 250, 370, 300]
-                    elif lot_right[2] >= PARK_RIGHT_MIN_Y and lot_right[0] > PARK_RIGHT_MIN_AREA:
-                        parking_r = True
-                        print(f"[PARKING] Lot on the RIGHT (area {lot_right[0]})")
-                        speed = PARK_SPEED
-                        if lot_right[0] > 3000:
-                            hold(PARK_SPEED, SERVO_CENTER, min(max(lot_right[0] / 4000 - 0.5, 0), 1))
-                        roi_floor = [270, 250, 450, 300]
-                    elif now - parking_lap_start > PARK_SEARCH_TIMEOUT:
-                        drive.stop(0, SERVO_CENTER)
-                        exit_reason = "parking lot not found within the timeout"
-                        break
-
-                if parking_r:
-                    if lot_front[2] > 290:          # lot too close ahead: back out a little
-                        hold(0, SERVO_CENTER, 0.1)
-                        hold(REVERSE_SPEED, SHARP_LEFT, 0.5)
-                        hold(0, SHARP_LEFT, 0.1)
-                    angle = SHARP_RIGHT
-                elif parking_l:
-                    if right_area > 12000 and lot_right[0] > 2000:     # drifted too far left
-                        hold(PARK_SPEED, SHARP_RIGHT, 1.0)
-                    if lot_front[2] > 280 and front_area < FRONT_WALL_STOP_AREA:
-                        roi_floor = [270, 250, 370, 300]
-                        hold(0, SERVO_CENTER, 0.1)
-                        hold(REVERSE_SPEED, SHARP_RIGHT, 0.5)
-                        hold(0, SHARP_RIGHT, 0.1)
-                    angle = SHARP_LEFT
-
-                if (parking_l or parking_r) and front_area > FRONT_WALL_STOP_AREA:
-                    final = SERVO_CENTER if parking_l else SHARP_RIGHT
-                    hold(PARK_SPEED, final, 0.2 + FINAL_PARK_DRIVE)
-                    drive.stop(0, SERVO_CENTER)
-                    exit_reason = f"parked ({'left' if parking_l else 'right'} lot)"
-                    break
-
             # ---------------------------------------------------------- steering
-            if not (parking_l or parking_r):
+            if True:
                 if pillar.area == 0:
                     a_diff = right_area - left_area
                     angle = SERVO_CENTER - (a_diff * KP + (a_diff - prev_diff) * KD)
@@ -408,38 +336,51 @@ def main():
                         end_turn("pillar")
                     error = pillar.target - pillar.x
                     angle = SERVO_CENTER - (error * c_kp + (error - prev_error) * c_kd)
-                    if not temp_parking:
-                        push = int(c_y * (pillar.y - roi_pillar[1]))
-                        angle += push if error <= 0 else -push
+                    push = int(c_y * (pillar.y - roi_pillar[1]))
+                    angle += push if error <= 0 else -push
 
                 # corner ROI: sharp turn at tight corners
                 if corner_area > CORNER_AREA.get(turn_dir, 1e9):
                     l_turn = r_turn = False
-                    if (pillar.area > 5000 or (temp_parking and pillar.area > 2000)
-                            or (turn_dir == "right" and pillar.area > 3500)):
+                    if pillar.area > 5000 or (turn_dir == "right" and pillar.area > 3500):
                         angle = SERVO_CENTER
                     else:
                         angle = SHARP_RIGHT if turn_dir == "right" else SHARP_LEFT
-                if not temp_parking and ((pillar.area == 0 and corner_area < 100)
-                                         or (abs(left_area - right_area) > 5000 and corner_area > 1000)):
+                if ((pillar.area == 0 and corner_area < 100)
+                        or (abs(left_area - right_area) > 5000 and corner_area > 1000)):
                     corner_on = False
 
-                # keep away from the parking lot during the laps
-                if not temp_parking:
-                    if lot_right[0] > LOT_AVOID_AREA:
-                        angle = SHARP_LEFT
-                    elif lot_left[0] > LOT_AVOID_AREA:
-                        angle = SHARP_RIGHT
+                # keep away from the parking lot
+                if lot_right[0] > LOT_AVOID_AREA:
+                    angle = SHARP_LEFT
+                elif lot_left[0] > LOT_AVOID_AREA:
+                    angle = SHARP_RIGHT
 
                 # turn exit by wall, and default turn angles when no pillar is in view
                 if ((r_turn and right_area >= EXIT_THRESH) or (l_turn and left_area >= EXIT_THRESH)) and not t_signal:
                     end_turn("wall")
                 if r_turn and pillar.area == 0 and right_area < 5000:
-                    angle = SERVO_CENTER + 25 if temp_parking else SHARP_RIGHT
+                    angle = SHARP_RIGHT
                 elif l_turn and pillar.area == 0 and left_area < 5000:
                     angle = SHARP_LEFT
 
             angle = int(max(SHARP_LEFT, min(SHARP_RIGHT, angle)))
+
+            # ------------------------------------------------ finish (no parking)
+            # After the last corner: once the steering is straight, drive on briefly and stop
+            # in the start section, exactly like the open challenge.
+            if t >= args.turns and finish_at is None:
+                if not (l_turn or r_turn) and abs(angle - SERVO_CENTER) <= FINISH_STRAIGHT_TOL:
+                    finish_at = now + FINISH_DELAY[turn_dir]
+                    print(f"[FINISH] All {t} turns done. Stopping in {FINISH_DELAY[turn_dir]:.2f}s")
+                elif now - last_turn_time > FINISH_MAX_WAIT:
+                    finish_at = now      # steering never settled straight: stop anyway
+                    print("[FINISH] Steering never settled straight - stopping now")
+            if finish_at is not None and now >= finish_at:
+                drive.stop(0 if args.steer_only else BRAKE_SPEED, SERVO_CENTER)
+                exit_reason = f"finished {t} turns"
+                break
+
             prev_error = error
             drive.drive(0 if args.steer_only else speed, angle)
 
@@ -448,10 +389,8 @@ def main():
                 print(f"[LINK] {'restored' if link_was_ok else 'DOWN - car stopped by ESP32 failsafe'}")
 
             # ---------------------------------------------------------- debug output
-            if parking_l or parking_r:
-                state = "PARK-L" if parking_l else "PARK-R"
-            elif temp_parking:
-                state = "SEARCH-LOT"
+            if finish_at is not None:
+                state = "FINISHING"
             elif pillar.area:
                 state = "PILLAR-R" if pillar.target == RED_TARGET else "PILLAR-G"
             else:

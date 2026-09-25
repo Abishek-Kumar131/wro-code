@@ -26,10 +26,10 @@
 int normal_speed = 250; // PWM (0-255) used by FORWARD / BACKWARD / STEER
 int turn_speed = 210;   // PWM (0-255) used by LEFT / RIGHT test commands
 
-//#---Servo Angles (+-40 deg steering range)---###########################################
+//#---Servo Angles (+-25 deg mechanical steering range)---###############################
 int servo_center = 100;                  // 100 deg (Straight center)
-int left_turn_angle = servo_center - 40; // 60 deg (Left turn)
-int right_turn_angle = servo_center + 40;// 140 deg (Right turn)
+int left_turn_angle = servo_center - 25; // 75 deg (full left)
+int right_turn_angle = servo_center + 25;// 125 deg (full right)
 //#######################################################################################
 
 // ########### USB Serial Command & Failsafe Definitions #################################//

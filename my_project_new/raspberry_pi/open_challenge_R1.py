@@ -47,11 +47,12 @@ ROI_LINE = [200, 300, 440, 350]
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
-SERVO_MIN, SERVO_MAX = 60, 140
+# Mechanical steering range of this car: 100 = straight, 75 = full left, 125 = full right
+SERVO_MIN, SERVO_MAX = 75, 125
 KP = 0.02               # Canada: 0.02
 KD = 0.006              # Canada: 0.006
-STRAIGHT_LIMIT = 25     # max steering offset from centre on straights
-TURN_DEVIATION = 25     # minimum steering offset from centre while turning
+STRAIGHT_LIMIT = 15     # max steering offset from centre on straights
+TURN_DEVIATION = 15     # minimum steering offset while turning (PD may use the full 25)
 
 # Turns
 TURN_THRESH = 150       # wall area at or below this: that wall has ended, start turning
@@ -69,6 +70,7 @@ START_DELAY = 0.5       # s between the button press and moving
 # Finish: after the last turn, drive on this long once straight, then stop.
 FINISH_DELAY = {"left": 1.0, "right": 1.5, "none": 1.25}   # Canada: 1.0 / 1.5 s
 FINISH_STRAIGHT_TOL = 10    # steering must be within this of centre to start the finish timer
+FINISH_MAX_WAIT = 3.0       # if it never settles that straight, stop anyway this long after the last turn
 BRAKE_SPEED = -180          # short reverse pulse to stop quickly (0 = coast to a stop)
 
 WINDOW = "WRO R1 Open Challenge"
@@ -133,6 +135,7 @@ def main():
     prev_diff = 0
     cooldown_until = 0.0
     finish_at = None
+    last_turn_time = 0.0
     link_was_ok = True
     exit_reason = "unknown"
 
@@ -192,6 +195,7 @@ def main():
                     l_turn = r_turn = False
                     prev_diff = 0
                     cooldown_until = now + TURN_COOLDOWN
+                    last_turn_time = now
                     if l_detected:
                         turns += 1
                         print(f"[TURN] {turns}/{args.turns} {side} done at {now - t_start:.1f}s")
@@ -208,10 +212,13 @@ def main():
             angle = int(angle)
 
             # ---------------------------------------------------------- finish
-            if (turns >= args.turns and finish_at is None and not (l_turn or r_turn)
-                    and abs(angle - SERVO_CENTER) <= FINISH_STRAIGHT_TOL):
-                finish_at = now + FINISH_DELAY[turn_dir]
-                print(f"[FINISH] All turns done. Stopping in {FINISH_DELAY[turn_dir]:.2f}s")
+            if turns >= args.turns and finish_at is None:
+                if not (l_turn or r_turn) and abs(angle - SERVO_CENTER) <= FINISH_STRAIGHT_TOL:
+                    finish_at = now + FINISH_DELAY[turn_dir]
+                    print(f"[FINISH] All turns done. Stopping in {FINISH_DELAY[turn_dir]:.2f}s")
+                elif now - last_turn_time > FINISH_MAX_WAIT:
+                    finish_at = now      # steering never settled straight: stop anyway
+                    print("[FINISH] Steering never settled straight - stopping now")
             if finish_at is not None and now >= finish_at:
                 drive.stop(0 if args.steer_only else BRAKE_SPEED, SERVO_CENTER)
                 exit_reason = f"finished {turns} turns"
