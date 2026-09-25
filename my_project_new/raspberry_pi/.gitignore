@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+fov_test/
+colour_test/

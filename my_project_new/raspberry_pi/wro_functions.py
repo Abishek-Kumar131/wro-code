@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -12,6 +13,20 @@ import masks as M
 from masks import rMagenta
 
 KERNEL5 = np.ones((5, 5), np.uint8)
+
+
+# Written by test_camera_color.py, read on every run, so a camera that delivers RGB is
+# corrected automatically without passing a flag.
+CAMERA_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_config.json")
+
+
+def load_camera_config():
+    try:
+        with open(CAMERA_CONFIG_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def is_wide(w, h):
@@ -112,11 +127,21 @@ class CameraManager:
         # (MJPG, YUYV) are converted to BGR for us, but a camera handing over raw RGB
         # is passed straight through - which makes the whole image look blue.
         if self.swap_rb is None:
-            self._swap_rb = self.fourcc.upper().startswith("RGB")
+            saved = load_camera_config()
+            if "swap_rb" in saved:
+                self._swap_rb = bool(saved["swap_rb"])
+                why = "measured by test_camera_color.py"
+            else:
+                self._swap_rb = self.fourcc.upper().startswith("RGB")
+                why = f"guessed from pixel format {self.fourcc}"
+        else:
+            why = "set on the command line"
+
         if self._swap_rb:
-            print(f"[CAMERA] Pixel format {self.fourcc}: swapping red/blue so colours are correct")
+            print(f"[CAMERA] Pixel format {self.fourcc}; swapping red/blue ({why})")
         elif self.is_webcam:
-            print(f"[CAMERA] Pixel format {self.fourcc}")
+            print(f"[CAMERA] Pixel format {self.fourcc}; no red/blue swap ({why}). "
+                  f"If the picture looks blue, run: python3 test_camera_color.py --save")
 
         if self.wide and not is_wide(self.width, self.height):
             print("[CAMERA WARNING] Asked for a 16:9 mode but got "
