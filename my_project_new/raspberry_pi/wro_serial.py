@@ -71,6 +71,9 @@ class WROSerialController:
 
         self.last_rx_time = 0.0
         self._last_uptime_ms = None
+        self._boot_times = []
+        self._reboot_storm_warned = False
+        self._last_boot_log = 0.0
         self.stats = {"disconnects": 0, "reconnects": 0, "esp_reboots": 0,
                       "failsafe_stops": 0, "dropped_writes": 0, "last_reset_reason": None,
                       "us_lines": 0}
@@ -196,6 +199,15 @@ class WROSerialController:
     def send_drive(self, speed: int, angle: int) -> bool:
         return self.send_command(f"DRIVE:{int(speed)}:{int(angle)}")
 
+    def health_warning(self):
+        """One-line warning if the link looks unhealthy, else None. Check before a run."""
+        if self.stats["esp_reboots"] >= 3:
+            return (f"the ESP32 has reset {self.stats['esp_reboots']} times already. It will keep "
+                    "resetting during the run and the car will only move in pulses. Fix the power first.")
+        if not self.link_ok:
+            return "no telemetry from the ESP32. Check the USB cable and that the firmware is flashed."
+        return None
+
     def get_us_data(self) -> dict:
         """Kept for older scripts. This build has no ultrasonic sensors, so values stay 0."""
         return self.us_data
@@ -298,8 +310,36 @@ class WROSerialController:
             if self._last_uptime_ms is not None:
                 self.stats["esp_reboots"] += 1
             self._last_uptime_ms = 0
-            hint = " <-- POWER PROBLEM (supply voltage dipped)" if "BROWNOUT" in reason else ""
-            _log(f"ESP32 booted, reset reason: {reason}{hint}")
+
+            now = time.time()
+            self._boot_times.append(now)
+            self._boot_times = [t for t in self._boot_times if now - t < 10.0]
+
+            # Repeated resets are a power fault. Say it once, loudly, then stop flooding
+            # the log - otherwise the reboot lines drown out the actual driving telemetry.
+            if len(self._boot_times) >= 4 and not self._reboot_storm_warned:
+                self._reboot_storm_warned = True
+                span = max(0.05, self._boot_times[-1] - self._boot_times[0])
+                rate = (len(self._boot_times) - 1) / span
+                _log("=" * 66)
+                _log(f"ESP32 IS RESETTING REPEATEDLY - about {rate:.1f} times per second.")
+                _log("The car will only move in short pulses, because the ESP32 restarts")
+                _log("every time and the failsafe stops the motor.")
+                _log("This is a POWER fault, not software. Check in this order:")
+                _log("  1. Is the servo (or anything else) powered from the ESP32 board's")
+                _log("     5V/3V3 pin? It must have its own supply from the battery.")
+                _log("  2. Measure the ESP32's supply pin with the motor and servo")
+                _log("     disconnected - it should sit steady at 5 V (or 3.3 V).")
+                _log("  3. Unplug the servo, then the sensors, and see which one stops it.")
+                _log("  4. Add ~1000uF across the supply, close to the board.")
+                _log("Reset reason POWERON means the supply collapsed or EN was pulled low.")
+                _log("=" * 66)
+            elif not self._reboot_storm_warned or now - self._last_boot_log > 10.0:
+                self._last_boot_log = now
+                hint = " <-- POWER PROBLEM (supply voltage dipped)" if "BROWNOUT" in reason else ""
+                total = self.stats["esp_reboots"]
+                extra = f" (reboots this run: {total})" if total else ""
+                _log(f"ESP32 booted, reset reason: {reason}{hint}{extra}")
             return
 
         if line.startswith("INFO:FAILSAFE_STOP"):

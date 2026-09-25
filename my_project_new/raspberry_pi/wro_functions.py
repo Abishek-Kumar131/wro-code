@@ -54,11 +54,24 @@ class CameraManager:
             try:
                 from picamera2 import Picamera2
                 size = (1280, 720) if self.wide else (640, 480)
+
+                # Only use Picamera2 for a real CSI camera. libcamera also lists USB
+                # cameras through its uvcvideo pipeline, and driving one that way fails
+                # (no FrameDurationLimits control) while still holding /dev/videoN open,
+                # which then stops OpenCV from using it.
+                csi = [i for i, cam in enumerate(Picamera2.global_camera_info())
+                       if "uvcvideo" not in str(cam.get("Id", "")).lower()]
+                if not csi:
+                    raise RuntimeError("libcamera only sees USB cameras; OpenCV handles those better")
+
                 print(f"[INFO] Initializing Picamera2 (Pi CSI Camera) at {size[0]}x{size[1]}...")
-                self.picam2 = Picamera2()
+                self.picam2 = Picamera2(csi[0])
                 self.picam2.preview_configuration.main.size = size
                 self.picam2.preview_configuration.main.format = "RGB888"
-                self.picam2.preview_configuration.controls.FrameRate = 30
+                try:
+                    self.picam2.preview_configuration.controls.FrameRate = 30
+                except Exception:
+                    pass
                 self.picam2.preview_configuration.align()
                 self.picam2.configure("preview")
                 self.picam2.start()
@@ -68,6 +81,13 @@ class CameraManager:
                 print("[SUCCESS] Picamera2 initialized!")
             except Exception as e:
                 print(f"[INFO] Picamera2 not available ({e}). Switching to USB Webcam...")
+                if self.picam2 is not None:
+                    # Must release it, or the camera stays busy and OpenCV cannot open it
+                    try:
+                        self.picam2.close()
+                    except Exception:
+                        pass
+                    self.picam2 = None
                 self._start_webcam()
 
     def _note_size(self, frame):
@@ -113,7 +133,19 @@ class CameraManager:
         return cap, frame
 
     def _start_webcam(self):
-        search_indices = [self.device_index, 0, 1, 2, 3, 4, 5, 6, 8]
+        try:                                   # keep OpenCV's per-attempt warnings quiet
+            cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+        except Exception:
+            pass
+
+        # On Linux only probe video devices that actually exist, instead of 0-8 blindly
+        if sys.platform.startswith("linux"):
+            import glob as _glob
+            present = sorted(int(p.rsplit("video", 1)[1]) for p in _glob.glob("/dev/video*")
+                             if p.rsplit("video", 1)[-1].isdigit())
+            search_indices = [self.device_index] + present if present else [self.device_index]
+        else:
+            search_indices = [self.device_index, 0, 1, 2, 3, 4, 5, 6, 8]
         seen = set()
         search_indices = [x for x in search_indices if not (x in seen or seen.add(x))]
         modes = self.MODES_WIDE if self.wide else self.MODES_43
