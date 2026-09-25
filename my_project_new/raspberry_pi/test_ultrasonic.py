@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 """
-BRANCH: camera-only-canada-strategy  (camera only - NO ultrasonic sensors)
-
 ROBOVANGUARD - WRO Future Engineers 2026
 Ultrasonic sensor test and diagnostic tool.
 
-IMPORTANT ON THIS BRANCH
-  The firmware on this branch does not read the ultrasonic sensors at all, so this tool
-  will report no telemetry. That is expected here, not a fault.
-  To test the sensors, flash the firmware from the us-vision-hybrid branch first:
-      git checkout us-vision-hybrid
-      (then flash ROBOVANGUARD_WRO_Round_1_Code_Final in the Arduino IDE)
-  The tool is kept here so the sensors can be checked without switching branches on the
-  Pi, and so both branches stay in step.
+Works on every branch: the firmware is shared and always streams the sensor readings,
+whether or not the Pi code uses them. us-vision-hybrid drives on them;
+camera-only-canada-strategy ignores them.
 
 Shows every sensor live and, when you stop it, prints a verdict per sensor so you can
 tell a dead sensor from a noisy one. Nothing moves: the motor is never commanded.
@@ -132,7 +125,7 @@ def main():
     keys = (args.sensor,) if args.sensor else KEYS
 
     print("=" * 74)
-    print("   ROBOVANGUARD - Ultrasonic sensor test   (branch: camera-only-canada-strategy)")
+    print("   ROBOVANGUARD - Ultrasonic sensor test")
     print("   The motor is never commanded. Ctrl+C to stop and see the summary.")
     print("=" * 74)
 
@@ -187,9 +180,9 @@ def main():
 
             if (not warned_no_telemetry and now - t_start > 3.0 and link.stats["us_lines"] == 0):
                 warned_no_telemetry = True
-                print("\n[NOTE] No US: telemetry, which is EXPECTED on this branch:")
-                print("       the camera-only firmware does not read the ultrasonic sensors.")
-                print("       Flash the us-vision-hybrid firmware to test the sensors.\n")
+                print("\n[WARNING] The ESP32 has not sent a single US: line in 3 s.")
+                print("          The shared firmware sends them 10x per second on every branch,")
+                print("          so the ESP32 is probably running older firmware - re-flash it.\n")
                 printed_lines = 0
 
             time.sleep(max(0.01, 1.0 / args.rate))
@@ -205,9 +198,9 @@ def main():
         print("   SUMMARY")
         print("=" * 74)
         if link.stats["us_lines"] == 0:
-            print("  No ultrasonic telemetry was received - EXPECTED on this branch, because the")
-            print("  camera-only firmware does not read the sensors. Flash the us-vision-hybrid")
-            print("  firmware to test them. Nothing below is meaningful until then.")
+            print("  No ultrasonic telemetry was received at all.")
+            print("  The shared firmware sends US: lines on every branch, so the ESP32 is likely")
+            print("  running older firmware - re-flash it. Nothing below is meaningful until then.")
         for k in keys:
             tag, why = stats[k].verdict(args.expect)
             print(f"  {LABELS[k]:>11s} ({k:2s})  {tag:7s}  {why}")

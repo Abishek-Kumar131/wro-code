@@ -1,4 +1,6 @@
-/* BRANCH: camera-only-canada-strategy  -  camera only, ESP32 reads NO sensors */
+/* SHARED FIRMWARE - byte-identical on every branch.
+   Flash it once. Switching the Pi between branches needs NO re-flash.
+   Ultrasonic sensors are optional: with none connected every reading stays 0. */
 /*
   ROBOVANGUARD – WRO Future Engineers 2026
   World Robot Olympiad – Future Engineers Division
@@ -14,7 +16,8 @@
            used by the Round 1 control logic.
 */
 
-#include <Wire.h>     // kept for a future I2C IMU on GPIO 21 (SDA) / 22 (SCL)
+#include <Wire.h>
+#include <NewPing.h>
 #include <FastLED.h>
 
 // ########### Declerations ############################################################################################################ //
@@ -40,8 +43,37 @@ const int servo_chan = 4;     // Dedicated LEDC Channel 4 (isolated from DC moto
 const int servo_freq = 50;    // Standard 50Hz servo refresh rate (20ms period)
 const int servo_res = 14;     // 14-bit resolution (0 - 16383)
 
-// Ultrasonic sensors removed (camera-only build). Their former pins are now free:
-// 2, 4, 5, 12, 14, 16, 17, 18, 19, 23, 25, 26
+// Ultrasonic Sensors
+
+#define FRONT_TRIGGER 12 
+#define FRONT_ECHO  4  
+
+#define FRONT1_TRIGGER 16
+#define FRONT1_ECHO 14
+
+#define FRONT2_TRIGGER 25 
+#define FRONT2_ECHO  26  
+
+#define BACK_TRIGGER 17
+#define BACK_ECHO 19
+
+#define LEFT_TRIGGER  2
+#define LEFT_ECHO  23
+
+#define RIGHT_TRIGGER 5
+#define RIGHT_ECHO  18
+
+// 200 cm is more than enough on a 3 m track and caps one ping at ~11 ms of blocking
+// (400 cm made every ping block up to ~23 ms).
+#define MAX_DISTANCE 200
+
+NewPing sonar1(FRONT_TRIGGER, FRONT_ECHO, MAX_DISTANCE);
+NewPing sonar5(FRONT1_TRIGGER, FRONT1_ECHO, MAX_DISTANCE);
+NewPing sonar6(FRONT2_TRIGGER, FRONT2_ECHO, MAX_DISTANCE);
+
+NewPing sonar2(BACK_TRIGGER, BACK_ECHO, MAX_DISTANCE);
+NewPing sonar3(LEFT_TRIGGER, LEFT_ECHO, MAX_DISTANCE);
+NewPing sonar4(RIGHT_TRIGGER, RIGHT_ECHO, MAX_DISTANCE);
 
 
 
@@ -152,6 +184,34 @@ void execute_drive(int speed, int angle) {
   } else {
     motor_stop();
   }
+}
+
+
+
+// ########### Ultrasonic round-robin ###################################################
+// One sensor per call, at most one ping every PING_INTERVAL ms. All six refresh in
+// ~120 ms. The order alternates front/side/back so that two sensors pointing in similar
+// directions never fire back to back, which is what caused ghost echoes before.
+
+extern int f_us, f1_us, f2_us, b_us, l_us, r_us;
+
+const unsigned long PING_INTERVAL = 20;   // ms between pings
+unsigned long lastPingTime = 0;
+int pingIndex = 0;
+
+void updateUltrasonics() {
+  if (millis() - lastPingTime < PING_INTERVAL) return;
+  lastPingTime = millis();
+
+  switch (pingIndex) {
+    case 0: f_us  = sonar1.ping_cm(); break;   // front
+    case 1: l_us  = sonar3.ping_cm(); break;   // left
+    case 2: f1_us = sonar5.ping_cm(); break;   // front-left
+    case 3: r_us  = sonar4.ping_cm(); break;   // right
+    case 4: f2_us = sonar6.ping_cm(); break;   // front-right
+    case 5: b_us  = sonar2.ping_cm(); break;   // back
+  }
+  pingIndex = (pingIndex + 1) % 6;
 }
 
 // ########### Setup ############################################################################################################ //
