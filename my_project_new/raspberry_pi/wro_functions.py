@@ -176,11 +176,16 @@ class CameraManager:
         modes = self.MODES_WIDE if self.wide else self.MODES_43
         backends = [cv2.CAP_V4L2, cv2.CAP_ANY] if sys.platform.startswith("linux") else [cv2.CAP_ANY]
 
-        fallback = None     # a working camera whose aspect is not what we asked for
+        # Probe every mode first and release it again, then pick the best one and reopen.
+        # Ranking, in order: the aspect we asked for, then MJPG.
+        # MJPG matters because OpenCV decodes it to BGR just like the old 640x480 capture
+        # did. Some cameras only offer raw RGB at wide sizes, and raw RGB comes through
+        # with red and blue swapped, which also makes orange floor lines look blue.
+        candidates = []
         for idx in search_indices:
             print(f"[INFO] Testing USB Webcam index {idx}...")
             for backend in backends:
-                for (w, h) in modes:
+                for order, (w, h) in enumerate(modes):
                     try:
                         cap, frame = self._open(idx, backend, w, h)
                     except Exception:
@@ -189,31 +194,44 @@ class CameraManager:
                         continue
                     fh, fw = frame.shape[:2]
                     fourcc = self._fourcc_of(cap)
-                    if (not self.wide) or is_wide(fw, fh):
-                        print(f"[SUCCESS] USB Webcam on index {idx} (/dev/video{idx}), "
-                              f"asked {w}x{h}, got {fw}x{fh} in {fourcc}")
-                        self.cap = cap
-                        self.device_index = idx
-                        self.is_webcam = True
-                        self.fourcc = fourcc
-                        self._note_size(frame)
-                        return
-                    if fallback is None:
-                        fallback = (idx, cap, frame, fourcc)   # keep in case nothing is 16:9
-                    else:
-                        cap.release()
+                    cap.release()
+                    candidates.append({"idx": idx, "backend": backend, "w": w, "h": h,
+                                       "fw": fw, "fh": fh, "fourcc": fourcc, "order": order})
+                if candidates:
+                    break          # this backend works on this device; no need for the other
+            if candidates:
+                break              # first working device wins
 
-        if fallback is not None:
-            idx, cap, frame, fourcc = fallback
-            print(f"[WARNING] No 16:9 mode worked on this camera; using what it gave instead.")
-            self.cap = cap
-            self.device_index = idx
+        if not candidates:
+            print("[ERROR] Could not find any working USB webcam!", file=sys.stderr)
             self.is_webcam = True
-            self.fourcc = fourcc
+            self.cap = None
+            return
+
+        def aspect_ok(c):
+            return is_wide(c["fw"], c["fh"]) if self.wide else not is_wide(c["fw"], c["fh"])
+
+        def rank(c):
+            return (aspect_ok(c), c["fourcc"].upper() == "MJPG", -c["order"])
+
+        for c in sorted(candidates, key=rank, reverse=True):
+            cap, frame = self._open(c["idx"], c["backend"], c["w"], c["h"])
+            if cap is None:
+                continue
+            self.cap = cap
+            self.device_index = c["idx"]
+            self.is_webcam = True
+            self.fourcc = self._fourcc_of(cap)
+            fh, fw = frame.shape[:2]
+            print(f"[SUCCESS] USB Webcam on index {c['idx']} (/dev/video{c['idx']}), "
+                  f"asked {c['w']}x{c['h']}, got {fw}x{fh} in {self.fourcc}")
+            if self.wide and not aspect_ok(c):
+                others = ", ".join(sorted({f"{x['fw']}x{x['fh']} {x['fourcc']}" for x in candidates}))
+                print(f"[WARNING] No 16:9 mode worked on this camera. It offered: {others}")
             self._note_size(frame)
             return
 
-        print("[ERROR] Could not find any working USB webcam across indices 0-8!", file=sys.stderr)
+        print("[ERROR] Every camera mode failed on reopen!", file=sys.stderr)
         self.is_webcam = True
         self.cap = None
 
