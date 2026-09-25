@@ -28,7 +28,7 @@ Fixed since the version on main:
     ESP32 failsafe fed.
   - Parking removed: the car now finishes like the open challenge. Magenta still counts
     as wall, so the car steers around the parking lot instead of into it.
-  - Steering limited to 75-125 degrees to match the mechanical range of this linkage.
+  - Steering limited to 70-130 degrees (+-30). Past ~30 deg the tyres skid.
   - Any exception now stops the car and prints why, instead of only Ctrl+C.
 
 Usage
@@ -85,8 +85,11 @@ ROIS_WIDE = {
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
-# Mechanical steering range of this car: 100 = straight, 75 = full left, 125 = full right
-SERVO_MIN, SERVO_MAX = 75, 125
+# Usable steering range: 100 = straight, 70 = full left, 130 = full right (+-30).
+# Past about 30 deg the front tyres scrub and skid instead of steering.
+SERVO_MIN, SERVO_MAX = 70, 130
+SIDE_GUARD_ANGLE = 24   # hardest steering allowed while a wall is close during a dodge
+EVADE_HOLD_ANGLE = 18   # parallel heading held after a pillar leaves view
 
 # Pillar avoidance
 PILLAR_GAINS = {"normal": (0.34, 0.26, 0.14, 20),    # (kp, kd, cy, end_const)
@@ -462,17 +465,17 @@ def main():
                         angle += push if error <= 0 else -push
                         if use_us:      # dodging must not put us into a wall
                             if pillar.target == RED_TARGET and us.near("r", SIDE_GUARD_CM):
-                                angle = min(angle, 120)
+                                angle = min(angle, SERVO_CENTER + SIDE_GUARD_ANGLE)
                             elif pillar.target == GREEN_TARGET and us.near("l", SIDE_GUARD_CM):
-                                angle = max(angle, 80)
+                                angle = max(angle, SERVO_CENTER - SIDE_GUARD_ANGLE)
                         prev_error = error
                         evade_angle = angle
                     else:
                         # pillar just left view: hold a parallel heading so the rear wheel clears it
                         if evade_target == RED_TARGET:
-                            angle = clamp(evade_angle, 100, 115)
+                            angle = clamp(evade_angle, SERVO_CENTER, SERVO_CENTER + EVADE_HOLD_ANGLE)
                         else:
-                            angle = clamp(evade_angle, 85, 100)
+                            angle = clamp(evade_angle, SERVO_CENTER - EVADE_HOLD_ANGLE, SERVO_CENTER)
                     speed = PILLAR_SPEED
                 else:
                     both_walls = left_area > WALL_VISIBLE_AREA and right_area > WALL_VISIBLE_AREA

@@ -25,7 +25,7 @@ Fixed since the version on main:
     instead of blocking the loop blind for up to 1.2 s.
   - Removed the AUTO_US_ON call before the finish: any DRIVE command cancels it anyway.
   - Any exception now stops the car and prints why, instead of only Ctrl+C.
-  - Steering limited to 75-125 degrees to match the mechanical range of this linkage.
+  - Steering limited to 70-130 degrees (+-30). Past ~30 deg the tyres skid.
 
 Usage
   python3 open_challenge_R1.py                  wait for button, run 3 laps
@@ -72,8 +72,11 @@ ROIS_WIDE = {
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
 SERVO_CENTER = 100
-# Mechanical steering range of this car: 100 = straight, 75 = full left, 125 = full right
-SERVO_MIN, SERVO_MAX = 75, 125
+# Usable steering range: 100 = straight, 70 = full left, 130 = full right (+-30).
+# Past about 30 deg the front tyres scrub and skid instead of steering, so this is the
+# usable limit rather than the mechanical one.
+SERVO_MIN, SERVO_MAX = 70, 130
+SIDE_NUDGE_ANGLE = 18   # how hard to steer away from a side wall that is too close
 DUAL_WALL_GAIN = 0.015      # both walls visible: centre between them
 SINGLE_WALL_GAIN = 0.01     # fallback
 CORNER_APPROACH_GAIN = 0.008
@@ -357,9 +360,9 @@ def main():
 
                 if use_us:      # nudge away from a side wall we are about to touch
                     if us.near("r", SIDE_NUDGE_CM):
-                        angle = min(angle, SERVO_CENTER - 15)
+                        angle = min(angle, SERVO_CENTER - SIDE_NUDGE_ANGLE)
                     elif us.near("l", SIDE_NUDGE_CM):
-                        angle = max(angle, SERVO_CENTER + 15)
+                        angle = max(angle, SERVO_CENTER + SIDE_NUDGE_ANGLE)
 
                 angle = int(clamp(angle, SERVO_MIN, SERVO_MAX))
 
