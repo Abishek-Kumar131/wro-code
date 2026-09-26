@@ -56,6 +56,7 @@ ROIS_43 = {
     "left":  (0.031, 0.354, 0.375, 0.458),
     "right": (0.625, 0.354, 0.969, 0.458),
     "line":  (0.313, 0.625, 0.688, 0.729),
+    "front": (0.390, 0.860, 0.610, 0.990),
 }
 # Wide defaults sit further out and are taller than the 4:3 ones: a wide lens puts the
 # side walls near the edges of the frame. These are a starting point only - set them on
@@ -64,6 +65,8 @@ ROIS_WIDE = {
     "left":  (0.02, 0.42, 0.32, 0.58),
     "right": (0.68, 0.42, 0.98, 0.58),
     "line":  (0.33, 0.70, 0.67, 0.86),
+    # narrow box at the very bottom of the frame: what the car is about to drive into
+    "front": (0.42, 0.86, 0.58, 0.99),
 }
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
@@ -88,9 +91,20 @@ TURN_COOLDOWN = 0.5     # s after a turn ends before a new one may start
 # turn may only trigger on a side that was actually seen recently. Without this, an empty
 # ROI at the start (car parked where a wall is outside the box) instantly reads as a
 # corner and the car goes to full lock left, then right, into the wall ahead.
-WALL_SEEN_AREA = 600    # a wall must have reached at least this area...
-WALL_MEMORY = 2.0       # ...within this many seconds for its loss to count as a corner
+WALL_SEEN_AREA = 400    # a wall must have reached at least this area...
+WALL_MEMORY = 3.0       # ...within this many seconds for its loss to count as a corner
 START_GRACE = 1.0       # s after the start during which no turn may trigger at all
+
+# Front wall box: a narrow rectangle at the very bottom of the frame, showing what the
+# car is about to drive into. When it fills with black the car stops, reverses a little,
+# and then turns in the direction the track has been going. This is what takes the
+# corner when the side ROIs cannot see the inner wall ending.
+FRONT_BLOCK_AREA = 2500   # black area in the front box that counts as "wall ahead".
+                          # Watch F= in the status line: near 0 on open track, thousands
+                          # when a wall fills the box. Put this in between.
+FRONT_BACK_SPEED = -215   # PWM while backing away from the wall
+FRONT_BACK_TIME = 0.55    # s of reversing before turning
+FRONT_COOLDOWN = 1.5      # s before the front box may trigger again
 TOTAL_TURNS = 12
 
 # Speed (PWM 0-255). Start conservative, raise once the turns are reliable.
@@ -172,10 +186,11 @@ def main():
     ROI_LEFT = roi_px(rois["left"], FRAME_W, FRAME_H)
     ROI_RIGHT = roi_px(rois["right"], FRAME_W, FRAME_H)
     ROI_LINE = roi_px(rois["line"], FRAME_W, FRAME_H)
+    ROI_FRONT = roi_px(rois["front"], FRAME_W, FRAME_H)
     AREA = area_norm(FRAME_W, FRAME_H)
     print(f"[CAMERA] {FRAME_W}x{FRAME_H} "
           f"({'16:9 - full sensor width' if wide else '4:3 - sides cropped off the sensor'})")
-    print(f"[ROI] left {ROI_LEFT}  right {ROI_RIGHT}  line {ROI_LINE}")
+    print(f"[ROI] left {ROI_LEFT}  right {ROI_RIGHT}  line {ROI_LINE}  front {ROI_FRONT}")
 
     if not args.no_wait:
         wait_for_button_press(args.pin, args.active_high, camera, show, WINDOW)
@@ -192,6 +207,9 @@ def main():
     l_turn = r_turn = False
     left_seen_at = right_seen_at = 0.0     # when each wall was last properly in view
     walls_checked = False
+    last_turn_side = "none"                # which way the last corner went
+    front_clear_until = 0.0
+    front_blocks = 0
     l_detected = False          # a floor line was seen since the last counted turn
     turns = 0
     prev_diff = 0
@@ -229,6 +247,9 @@ def main():
             right_area = int(max_contour(c_right, ROI_RIGHT)[0] * AREA)
             orange_area = int(max_contour(c_orange, ROI_LINE)[0] * AREA)
             blue_area = int(max_contour(c_blue, ROI_LINE)[0] * AREA)
+            hsv, lab = roi_hsv_lab(img, ROI_FRONT)
+            c_front = contours_of(wall_mask(hsv, lab), WALL_MIN_AREA)
+            front_area = int(max_contour(c_front, ROI_FRONT)[0] * AREA)
 
             # ---------------------------------------------------------- floor lines
             orange_seen = orange_area > LINE_MIN_AREA
@@ -246,6 +267,42 @@ def main():
             prev_diff = a_diff
 
             # ---------------------------------------------------------- turn state
+            # ---------------------------------------------------------- wall straight ahead
+            if (front_area >= FRONT_BLOCK_AREA and now >= front_clear_until
+                    and not (l_turn or r_turn) and turns < args.turns):
+                # Which way does the track go? The locked direction, else the way the last
+                # corner went, else whichever side has less wall in view (the open side).
+                if turn_dir in ("left", "right"):
+                    escape = turn_dir
+                elif last_turn_side in ("left", "right"):
+                    escape = last_turn_side
+                else:
+                    escape = "left" if left_area <= right_area else "right"
+                front_blocks += 1
+                print(f"\n[FRONT] Wall ahead (F={front_area}). Backing up, then turning "
+                      f"{escape.upper()} (L={left_area} R={right_area})")
+
+                drive.drive(0, SERVO_CENTER, force=True)
+                back_start = time.time()
+                while time.time() - back_start < FRONT_BACK_TIME:
+                    f = camera.capture_array()
+                    if f is None:
+                        continue
+                    drive.drive(0 if args.steer_only else FRONT_BACK_SPEED, SERVO_CENTER)
+                    if show:
+                        cv2.imshow(WINDOW, f)
+                        cv2.waitKey(1)
+                drive.drive(0, SERVO_CENTER, force=True)
+
+                # carry on into the corner: the normal turn logic ends it when the wall
+                # on that side comes back into view
+                if escape == "left":
+                    l_turn = True
+                else:
+                    r_turn = True
+                front_clear_until = time.time() + FRONT_COOLDOWN
+                continue
+
             if left_area >= WALL_SEEN_AREA:
                 left_seen_at = now
             if right_area >= WALL_SEEN_AREA:
@@ -275,6 +332,7 @@ def main():
                     side = "RIGHT" if r_turn else "LEFT"
                     l_turn = r_turn = False
                     prev_diff = 0
+                    last_turn_side = side.lower()
                     cooldown_until = now + TURN_COOLDOWN
                     last_turn_time = now
                     if l_detected:
@@ -321,7 +379,7 @@ def main():
             if status_to_terminal and now - last_status > 0.2:
                 last_status = now
                 print(f"\r{state:8s} t={turns:2d} L={left_area:5d} R={right_area:5d} "
-                      f"O={orange_area:4d} B={blue_area:4d} ang={angle:3d} fps={fps.fps:4.1f} "
+                      f"O={orange_area:4d} B={blue_area:4d} F={front_area:5d} ang={angle:3d} fps={fps.fps:4.1f} "
                       f"link={'ok' if link.link_ok else 'DOWN'}   ", end="", flush=True)
 
             if show:
@@ -329,6 +387,8 @@ def main():
                 draw_roi(disp, ROI_LEFT, (0, 255, 255))
                 draw_roi(disp, ROI_RIGHT, (0, 255, 255))
                 draw_roi(disp, ROI_LINE, (255, 255, 0))
+                draw_roi(disp, ROI_FRONT, (0, 0, 255))
+                draw_offset_contours(disp, c_front, ROI_FRONT, (0, 0, 255))
                 draw_offset_contours(disp, c_left, ROI_LEFT, (0, 255, 0))
                 draw_offset_contours(disp, c_right, ROI_RIGHT, (0, 255, 0))
                 draw_offset_contours(disp, c_orange, ROI_LINE, (0, 165, 255))
@@ -360,6 +420,8 @@ def main():
         if show:
             cv2.destroyAllWindows()
         print()
+        if front_blocks:
+            print(f"[EXIT] Front-wall stops: {front_blocks}")
         print(f"[EXIT] Run ended: {exit_reason} | turns {turns}/{args.turns} | "
               f"{time.time() - t_start:.1f}s | avg fps {fps.fps:.1f}")
         link.disconnect()

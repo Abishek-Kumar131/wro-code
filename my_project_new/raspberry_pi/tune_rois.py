@@ -38,6 +38,9 @@ What to aim for
   pillar      The area ahead where traffic signs appear. Wide is fine.
   floor       Directly ahead, near the car: floor lines and the magenta parking lot.
   corner      A small patch straight ahead, used only to sharpen tight corners.
+  front       A narrow box at the very bottom: what the car is about to drive into.
+              It should read near 0 on open track and fill with black only when a wall
+              is close ahead. Compare with FRONT_BLOCK_AREA in open_challenge_R1.py.
 
 The live numbers under each name are what the navigation code would measure right now,
 normalised to 640x480 equivalents. Compare them with the thresholds in the scripts
@@ -58,10 +61,12 @@ DEFAULTS = {
     1: {  # open challenge
         "wide": {"left": (0.02, 0.42, 0.32, 0.58),
                  "right": (0.68, 0.42, 0.98, 0.58),
-                 "line": (0.33, 0.70, 0.67, 0.86)},
+                 "line": (0.33, 0.70, 0.67, 0.86),
+                 "front": (0.42, 0.86, 0.58, 0.99)},
         "narrow": {"left": (0.031, 0.354, 0.375, 0.458),
                    "right": (0.625, 0.354, 0.969, 0.458),
-                   "line": (0.313, 0.625, 0.688, 0.729)},
+                   "line": (0.313, 0.625, 0.688, 0.729),
+                   "front": (0.390, 0.860, 0.610, 0.990)},
     },
     2: {  # obstacle challenge
         "wide": {"left": (0.00, 0.36, 0.34, 0.58),
@@ -78,7 +83,8 @@ DEFAULTS = {
 }
 
 COLOURS = {"left": (0, 255, 255), "right": (0, 255, 255), "line": (255, 255, 0),
-           "pillar": (255, 204, 0), "floor": (255, 0, 255), "corner": (0, 0, 255)}
+           "pillar": (255, 204, 0), "floor": (255, 0, 255), "corner": (0, 0, 255),
+           "front": (0, 0, 255)}
 
 WINDOW = "ROI tuner  -  1..5 pick   arrows move   IJKL resize   O save   Q quit"
 
@@ -108,7 +114,7 @@ def measure(img, name, box, area):
         r = int(max_contour(contours_of(red_mask(hsv), 60), box)[0] * area)
         g = int(max_contour(contours_of(green_mask(hsv), 60), box)[0] * area)
         return "R/G", f"{r}/{g}"
-    if name == "corner":
+    if name in ("corner", "front"):
         return "wall", int(max_contour(contours_of(wall_mask(hsv, lab), 50), box)[0] * area)
     return "", 0
 
