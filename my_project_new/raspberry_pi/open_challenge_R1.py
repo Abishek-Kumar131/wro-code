@@ -84,6 +84,13 @@ EXIT_THRESH = 1500      # wall area above this on the turning side: turn finishe
 WALL_MIN_AREA = 50      # ignore wall blobs smaller than this
 LINE_MIN_AREA = 100     # a floor-line blob larger than this counts as "line seen"
 TURN_COOLDOWN = 0.5     # s after a turn ends before a new one may start
+# A corner is "the inner wall ENDED". A wall that was never in view has not ended, so a
+# turn may only trigger on a side that was actually seen recently. Without this, an empty
+# ROI at the start (car parked where a wall is outside the box) instantly reads as a
+# corner and the car goes to full lock left, then right, into the wall ahead.
+WALL_SEEN_AREA = 600    # a wall must have reached at least this area...
+WALL_MEMORY = 2.0       # ...within this many seconds for its loss to count as a corner
+START_GRACE = 1.0       # s after the start during which no turn may trigger at all
 TOTAL_TURNS = 12
 
 # Speed (PWM 0-255). Start conservative, raise once the turns are reliable.
@@ -183,6 +190,8 @@ def main():
     # ------------------------------------------------------------------ run state
     turn_dir = args.dir or "none"
     l_turn = r_turn = False
+    left_seen_at = right_seen_at = 0.0     # when each wall was last properly in view
+    walls_checked = False
     l_detected = False          # a floor line was seen since the last counted turn
     turns = 0
     prev_diff = 0
@@ -237,10 +246,28 @@ def main():
             prev_diff = a_diff
 
             # ---------------------------------------------------------- turn state
-            if not (l_turn or r_turn) and now >= cooldown_until and turns < args.turns:
-                if left_area <= TURN_THRESH and turn_dir in ("none", "left"):
+            if left_area >= WALL_SEEN_AREA:
+                left_seen_at = now
+            if right_area >= WALL_SEEN_AREA:
+                right_seen_at = now
+
+            if not walls_checked and now - t_start > 2.0:
+                walls_checked = True
+                missing = [name for name, seen in (("left", left_seen_at), ("right", right_seen_at))
+                           if seen == 0.0]
+                if missing:
+                    print(f"\n[WARNING] The {' and '.join(missing)} wall has not been seen at all in "
+                          f"the first 2s (L={left_area}, R={right_area}). The ROI boxes are probably "
+                          f"not on the walls - check with: python3 tune_rois.py")
+
+            if (not (l_turn or r_turn) and now >= cooldown_until and turns < args.turns
+                    and now - t_start >= START_GRACE):
+                # each side may only start a turn if that wall was really there just before
+                if (left_area <= TURN_THRESH and turn_dir in ("none", "left")
+                        and now - left_seen_at <= WALL_MEMORY):
                     l_turn = True
-                elif right_area <= TURN_THRESH and turn_dir in ("none", "right"):
+                elif (right_area <= TURN_THRESH and turn_dir in ("none", "right")
+                        and now - right_seen_at <= WALL_MEMORY):
                     r_turn = True
 
             if l_turn or r_turn:
