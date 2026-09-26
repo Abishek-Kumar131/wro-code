@@ -53,8 +53,8 @@ from wro_functions import (CameraManager, FpsCounter, roi_hsv_lab, wall_mask, or
 # Re-check these whenever the camera mount changes: the side walls must fill most of the
 # left/right ROIs on a straight.
 ROIS_43 = {
-    "left":  (0.031, 0.354, 0.375, 0.458),
-    "right": (0.625, 0.354, 0.969, 0.458),
+    "left":  (0.031, 0.354, 0.375, 0.740),
+    "right": (0.625, 0.354, 0.969, 0.740),
     "line":  (0.313, 0.625, 0.688, 0.729),
     "front": (0.390, 0.860, 0.610, 0.990),
 }
@@ -62,8 +62,11 @@ ROIS_43 = {
 # side walls near the edges of the frame. These are a starting point only - set them on
 # the real track with:  python3 tune_rois.py
 ROIS_WIDE = {
-    "left":  (0.02, 0.42, 0.32, 0.58),
-    "right": (0.68, 0.42, 0.98, 0.58),
+    # The side boxes run a long way DOWN the frame on purpose: a wall that is very
+    # close projects into the lower part of the picture, so a short band near the middle
+    # loses sight of exactly the wall the car is about to touch.
+    "left":  (0.02, 0.42, 0.32, 0.78),
+    "right": (0.68, 0.42, 0.98, 0.78),
     "line":  (0.33, 0.70, 0.67, 0.86),
     # narrow box at the very bottom of the frame: what the car is about to drive into
     "front": (0.42, 0.86, 0.58, 0.99),

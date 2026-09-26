@@ -32,7 +32,10 @@ Controls
 What to aim for
   left/right  On a straight, the side wall should fill most of the box and nothing else.
               A wide lens puts the walls near the edges of the frame, so these usually
-              belong further out than they look.
+              belong further out than they look. Keep them running well DOWN the frame:
+              a close wall appears low, and a short band loses it just when it matters.
+              Check the bottom edge does not catch the car's own bodywork - that would
+              read as wall permanently.
   line        Where the orange/blue floor lines cross, close enough to the car that the
               line is clearly inside the box when a corner is reached.
   pillar      The area ahead where traffic signs appear. Wide is fine.
@@ -59,12 +62,12 @@ from wro_functions import (CameraManager, ROI_CONFIG_PATH, area_norm, blue_mask,
 
 DEFAULTS = {
     1: {  # open challenge
-        "wide": {"left": (0.02, 0.42, 0.32, 0.58),
-                 "right": (0.68, 0.42, 0.98, 0.58),
+        "wide": {"left": (0.02, 0.42, 0.32, 0.78),
+                 "right": (0.68, 0.42, 0.98, 0.78),
                  "line": (0.33, 0.70, 0.67, 0.86),
                  "front": (0.42, 0.86, 0.58, 0.99)},
-        "narrow": {"left": (0.031, 0.354, 0.375, 0.458),
-                   "right": (0.625, 0.354, 0.969, 0.458),
+        "narrow": {"left": (0.031, 0.354, 0.375, 0.740),
+                   "right": (0.625, 0.354, 0.969, 0.740),
                    "line": (0.313, 0.625, 0.688, 0.729),
                    "front": (0.390, 0.860, 0.610, 0.990)},
     },
