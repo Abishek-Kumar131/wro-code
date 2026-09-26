@@ -91,8 +91,11 @@ TURN_COOLDOWN = 0.5     # s after a turn ends before a new one may start
 # turn may only trigger on a side that was actually seen recently. Without this, an empty
 # ROI at the start (car parked where a wall is outside the box) instantly reads as a
 # corner and the car goes to full lock left, then right, into the wall ahead.
-WALL_SEEN_AREA = 400    # a wall must have reached at least this area...
-WALL_MEMORY = 3.0       # ...within this many seconds for its loss to count as a corner
+# "Present" only has to mean clearly above the threshold that defines "ended", so a wall
+# that is visible but small at the start still lets the first corner be detected. Once a
+# side has been seen it stays enabled - the gate exists only to stop a wall that has
+# NEVER been in view from reading as a wall that just ended.
+WALL_SEEN_AREA = TURN_THRESH + 50
 START_GRACE = 1.0       # s after the start during which no turn may trigger at all
 
 # Front wall box: a narrow rectangle at the very bottom of the frame, showing what the
@@ -205,7 +208,8 @@ def main():
     # ------------------------------------------------------------------ run state
     turn_dir = args.dir or "none"
     l_turn = r_turn = False
-    left_seen_at = right_seen_at = 0.0     # when each wall was last properly in view
+    left_seen = right_seen = False         # has this wall ever really been in view?
+    left_seen_at = right_seen_at = 0.0     # and when, for the warning below
     walls_checked = False
     last_turn_side = "none"                # which way the last corner went
     front_clear_until = 0.0
@@ -304,9 +308,9 @@ def main():
                 continue
 
             if left_area >= WALL_SEEN_AREA:
-                left_seen_at = now
+                left_seen, left_seen_at = True, now
             if right_area >= WALL_SEEN_AREA:
-                right_seen_at = now
+                right_seen, right_seen_at = True, now
 
             if not walls_checked and now - t_start > 2.0:
                 walls_checked = True
@@ -320,11 +324,9 @@ def main():
             if (not (l_turn or r_turn) and now >= cooldown_until and turns < args.turns
                     and now - t_start >= START_GRACE):
                 # each side may only start a turn if that wall was really there just before
-                if (left_area <= TURN_THRESH and turn_dir in ("none", "left")
-                        and now - left_seen_at <= WALL_MEMORY):
+                if left_area <= TURN_THRESH and turn_dir in ("none", "left") and left_seen:
                     l_turn = True
-                elif (right_area <= TURN_THRESH and turn_dir in ("none", "right")
-                        and now - right_seen_at <= WALL_MEMORY):
+                elif right_area <= TURN_THRESH and turn_dir in ("none", "right") and right_seen:
                     r_turn = True
 
             if l_turn or r_turn:
