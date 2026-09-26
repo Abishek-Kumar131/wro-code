@@ -530,6 +530,62 @@ def display_variables(variables):
 # Run helpers shared by open_challenge_R1.py and obstacle_challenge_R2.py
 # ============================================================================
 
+class StuckDetector:
+    """
+    Notices when the view stops changing while the car is being told to drive.
+
+    Comparing frames for exact equality does NOT work: sensor noise means two frames are
+    almost never identical, even with the camera bolted down and the car held still. So
+    this measures HOW MUCH the picture is changing - the mean absolute difference between
+    small greyscale copies of consecutive frames - and calls it stuck when that stays
+    below `still_threshold` for `stuck_time` seconds while the motor is commanded on.
+
+    Typical values for the motion score: under ~1 when truly stationary, 5-30 when
+    driving. Watch the live number the scripts print and set the threshold between them.
+    """
+
+    def __init__(self, still_threshold=1.5, stuck_time=1.2, size=(64, 36)):
+        self.still_threshold = still_threshold
+        self.stuck_time = stuck_time
+        self.size = size
+        self.motion = 999.0
+        self._prev = None
+        self._still_since = None
+
+    def reset(self):
+        self._prev = None
+        self._still_since = None
+        self.motion = 999.0
+
+    def _thumb(self, frame):
+        small = cv2.resize(frame, self.size, interpolation=cv2.INTER_AREA)
+        if small.ndim == 3:
+            small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        return small.astype(np.int16)
+
+    def update(self, frame, moving, now=None):
+        """Feed every frame. `moving` = the car is currently commanded to drive."""
+        now = time.time() if now is None else now
+        small = self._thumb(frame)
+        if self._prev is None:
+            self._prev = small
+            return False
+        self.motion = float(np.abs(small - self._prev).mean())
+        self._prev = small
+
+        if not moving or self.motion > self.still_threshold:
+            self._still_since = None
+            return False
+        if self._still_since is None:
+            self._still_since = now
+            return False
+        return (now - self._still_since) >= self.stuck_time
+
+    @property
+    def still_for(self):
+        return 0.0 if self._still_since is None else time.time() - self._still_since
+
+
 class FpsCounter:
     def __init__(self):
         self.fps = 0.0
