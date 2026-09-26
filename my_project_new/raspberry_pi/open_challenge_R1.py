@@ -87,6 +87,11 @@ EXIT_THRESH = 1500      # wall area above this on the turning side: turn finishe
 WALL_MIN_AREA = 50      # ignore wall blobs smaller than this
 LINE_MIN_AREA = 100     # a floor-line blob larger than this counts as "line seen"
 TURN_COOLDOWN = 0.5     # s after a turn ends before a new one may start
+# Turning the moment the inner wall ends starts the arc too early and the inner rear
+# wheel clips the corner. Carry straight on for this long first, so the car is further
+# past the corner before it steers in and takes a wider line.
+# This is a TIME, so it depends on SPEED - re-check it if you change the speed.
+TURN_DELAY = 0.5        # s between the wall ending and the steering going over
 # A corner is "the inner wall ENDED". A wall that was never in view has not ended, so a
 # turn may only trigger on a side that was actually seen recently. Without this, an empty
 # ROI at the start (car parked where a wall is outside the box) instantly reads as a
@@ -211,6 +216,8 @@ def main():
     left_seen = right_seen = False         # has this wall ever really been in view?
     left_seen_at = right_seen_at = 0.0     # and when, for the warning below
     walls_checked = False
+    turn_pending = None                    # side whose wall has ended, waiting to turn in
+    turn_at = 0.0                          # when that turn actually starts
     last_turn_side = "none"                # which way the last corner went
     front_clear_until = 0.0
     front_blocks = 0
@@ -300,6 +307,7 @@ def main():
 
                 # carry on into the corner: the normal turn logic ends it when the wall
                 # on that side comes back into view
+                turn_pending = None          # emergency: steer in now, no delay
                 if escape == "left":
                     l_turn = True
                 else:
@@ -321,13 +329,30 @@ def main():
                           f"the first 2s (L={left_area}, R={right_area}). The ROI boxes are probably "
                           f"not on the walls - check with: python3 tune_rois.py")
 
-            if (not (l_turn or r_turn) and now >= cooldown_until and turns < args.turns
-                    and now - t_start >= START_GRACE):
+            if (not (l_turn or r_turn) and turn_pending is None and now >= cooldown_until
+                    and turns < args.turns and now - t_start >= START_GRACE):
                 # each side may only start a turn if that wall was really there just before
                 if left_area <= TURN_THRESH and turn_dir in ("none", "left") and left_seen:
-                    l_turn = True
+                    turn_pending, turn_at = "left", now + TURN_DELAY
                 elif right_area <= TURN_THRESH and turn_dir in ("none", "right") and right_seen:
-                    r_turn = True
+                    turn_pending, turn_at = "right", now + TURN_DELAY
+                if turn_pending is not None:
+                    print(f"\n[TURN] {turn_pending.upper()} wall ended - carrying on "
+                          f"{TURN_DELAY:.2f}s before steering in")
+
+            if turn_pending is not None:
+                came_back = left_area if turn_pending == "left" else right_area
+                if came_back >= WALL_SEEN_AREA:
+                    # the wall is back, so that was a gap in it, not the end of it
+                    print(f"\n[TURN] {turn_pending.upper()} wall came back ({came_back}) "
+                          f"- not a corner after all")
+                    turn_pending = None
+                elif now >= turn_at:
+                    if turn_pending == "left":
+                        l_turn = True
+                    else:
+                        r_turn = True
+                    turn_pending = None
 
             if l_turn or r_turn:
                 if (r_turn and right_area > EXIT_THRESH) or (l_turn and left_area > EXIT_THRESH):
@@ -377,7 +402,8 @@ def main():
                 print(f"[LINK] {'restored' if link_was_ok else 'DOWN - car stopped by ESP32 failsafe'}")
 
             # ---------------------------------------------------------- debug output
-            state = "TURN-L" if l_turn else "TURN-R" if r_turn else "STRAIGHT"
+            state = ("TURN-L" if l_turn else "TURN-R" if r_turn else
+                     f"PRE-{turn_pending[0].upper()}" if turn_pending else "STRAIGHT")
             if status_to_terminal and now - last_status > 0.2:
                 last_status = now
                 print(f"\r{state:8s} t={turns:2d} L={left_area:5d} R={right_area:5d} "
