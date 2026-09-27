@@ -140,8 +140,17 @@ DODGE_SPEED = 215           # slower while going round a block that was right in
 # why the car appeared to freeze nose-to-nose with a block: it undid its own escape, crept
 # forward again, and stalled against it.
 REVERSE_MAX_TIME = 1.0      # s: hard cap on one attempt (stops it reversing into a wall)
+                            # keep this comfortably above REVERSE_MIN_TIME below
 REVERSE_ESCALATE = 1.6      # multiply that cap on a repeat attempt
 REVERSE_CLEAR_FRAC = 0.55   # "clear" = the block shrank to this fraction of the too-close area
+# The reverse always runs at least this long, whatever the camera thinks it sees. R1 backs
+# away from a wall for a fixed 0.55 s and that works; the closed-loop check here is only
+# allowed to make a reverse LONGER, never shorter. Without this floor one flickery reading
+# at contact range - where the contour is clipped by the ROI edge and jumps about - ended
+# the reverse on its first frame, so the car twitched and stopped instead of backing off.
+REVERSE_MIN_TIME = 0.45     # s of reversing before the "is it clear" check may end it
+REVERSE_CLEAR_FRAMES = 3    # consecutive clear frames needed, so one bad reading cannot
+                            # end the escape on its own
 REVERSE_STEER = 15          # deg of counter-steer on a repeat, to come out aimed past it
 # The escape always reverses from a standstill, usually pressed against the thing it is
 # escaping - the hardest possible start. Reverse out of forward motion breaks away easily
@@ -462,22 +471,27 @@ def main():
                       f"(attempt {reverse_streak}) -> reverse at {back_angle} for up to "
                       f"{limit:.1f}s, then go {dodge_dir or 'by the walls'}")
                 drive.drive(0, SERVO_CENTER, force=True)
-                time.sleep(0.12)                 # let the gearbox stop before it reverses
+                time.sleep(0.08)                 # let the gearbox stop before it reverses
                 t_rev = time.time()
                 cleared = False
+                clear_frames = 0
                 while time.time() - t_rev < limit:
                     # force=True resends every frame, so a dropped line or a reconnect
                     # cannot leave the car standing still on the ESP32 failsafe mid-escape
-                    kicking = time.time() - t_rev < REVERSE_KICK_TIME
-                    drive.drive(REVERSE_KICK_SPEED if kicking else REVERSE_SPEED,
-                                back_angle, force=True)
+                    elapsed = time.time() - t_rev
+                    drive.drive(REVERSE_KICK_SPEED if elapsed < REVERSE_KICK_TIME
+                                else REVERSE_SPEED, back_angle, force=True)
                     f_rev = camera.capture_array()
-                    if f_rev is None:
-                        continue
+                    if f_rev is None or elapsed < REVERSE_MIN_TIME:
+                        continue        # back up this far first, whatever the camera says
                     if (close_pillar(f_rev, roi_pillar, GEOM, REVERSE_CLEAR_FRAC)[0] == 0
                             and bumper_block(f_rev, roi_bumper, GEOM, REVERSE_CLEAR_FRAC)[0] == 0):
-                        cleared = True
-                        break
+                        clear_frames += 1
+                        if clear_frames >= REVERSE_CLEAR_FRAMES:
+                            cleared = True
+                            break
+                    else:
+                        clear_frames = 0
                 drive.drive(0, SERVO_CENTER, force=True)
                 time.sleep(0.1)
                 last_reverse_end = time.time()
@@ -485,7 +499,8 @@ def main():
                 reverse_ready_at = last_reverse_end + REVERSE_COOLDOWN
                 dodge_until = last_reverse_end + DODGE_TIME
                 print(f"[BLOCK] {'clear' if cleared else 'still there'} after "
-                      f"{last_reverse_end - t_rev:.2f}s of reverse")
+                      f"{last_reverse_end - t_rev:.2f}s of reverse "
+                      f"(floor {REVERSE_MIN_TIME:.2f}s, cap {limit:.2f}s)")
                 continue
 
             # ---------------------------------------------------------- floor lines / turns
