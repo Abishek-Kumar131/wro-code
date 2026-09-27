@@ -118,6 +118,22 @@ void motor_stop() {
 }
 #endif
 
+// Bench diagnostic only (PINTEST command): drive ONE motor pin and hold the other low.
+// motor_forward/backward always write both pins, so they cannot tell a dead GPIO from a
+// dead driver channel. This can: with the wheels up, PINTEST:1 should spin the motor one
+// way and PINTEST:2 the other. If one does nothing, the fault is on that pin's side -
+// its wire to IN1/IN2, that input of the driver, or that half of the H-bridge.
+void motor_pin_raw(int which, int duty) {
+  duty = constrain(duty, 0, 255);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  ledcWrite(motorPin1, which == 1 ? duty : 0);
+  ledcWrite(motorPin2, which == 2 ? duty : 0);
+#else
+  ledcWrite(dc_chan1, which == 1 ? duty : 0);
+  ledcWrite(dc_chan2, which == 2 ? duty : 0);
+#endif
+}
+
 
 // Servo Functions using Hardware LEDC (50Hz, 14-bit)
 void moveServoTo(int angle) {

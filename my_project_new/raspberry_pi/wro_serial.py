@@ -265,6 +265,9 @@ class WROSerialController:
             return True
         if parts[0] == "DRIVE" and len(parts) == 3 and is_int(parts[1]) and is_int(parts[2]):
             return True
+        # PINTEST:<1|2>:<duty> - bench diagnostic, drives one motor pin on its own
+        if parts[0] == "PINTEST" and len(parts) == 3 and is_int(parts[1]) and is_int(parts[2]):
+            return True
         return False
 
     def _write_raw(self, data: bytes) -> bool:

@@ -83,6 +83,7 @@ void updateUltrasonics();
 void rgb_led(int r, int g, int b);
 void moveServoTo(int angle);
 void motor_forward(int speed);
+void motor_pin_raw(int which, int duty);
 
 const char* resetReasonName(esp_reset_reason_t reason) {
   switch (reason) {
@@ -127,6 +128,32 @@ void processCommand(String cmd) {
       execute_drive(speed, angle);
     } else {
       Serial.println("ERROR:INVALID_DRIVE_FORMAT");
+    }
+    return;
+  }
+
+  // Bench diagnostic: PINTEST:<1|2>:<duty> drives one motor pin directly, bypassing
+  // motor_forward/backward, to find which half of the drive is not working.
+  if (cmd.startsWith("PINTEST:")) {
+    int firstColon = cmd.indexOf(':');
+    int secondColon = cmd.indexOf(':', firstColon + 1);
+    if (secondColon != -1) {
+      int which = cmd.substring(firstColon + 1, secondColon).toInt();
+      int duty = cmd.substring(secondColon + 1).toInt();
+      if (which == 1 || which == 2) {
+        isTurning = false;
+        useSideUltrasonic = false;
+        markActive();
+        motor_pin_raw(which, duty);
+        Serial.print("ACK:PINTEST:");
+        Serial.print(which);
+        Serial.print(":");
+        Serial.println(duty);
+      } else {
+        Serial.println("ERROR:PINTEST_PIN_MUST_BE_1_OR_2");
+      }
+    } else {
+      Serial.println("ERROR:INVALID_PINTEST_FORMAT");
     }
     return;
   }
