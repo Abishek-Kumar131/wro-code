@@ -104,6 +104,12 @@ LINE_MIN_AREA = 100
 EXIT_THRESH = 4000          # wall area on the turning side that ends a turn
 CORNER_AREA = {"left": 1000, "right": 1250}     # corner ROI area that forces a sharp turn
 TURN_LINE_COOLDOWN = 1.0    # s after a counted turn during which the turn line is ignored
+# A corner is only counted if it was really driven. Two guards, both learned the hard way:
+# a jammed car sat on one floor line and clocked up 11 of its 12 turns in 80 seconds
+# without moving, then stopped mid-round believing the run was over.
+TURN_MIN_TIME = 0.6         # s a turn must last before it can be counted (a corner is slower)
+LINE_REARM_TIME = 0.4       # s the line must be OUT of the floor ROI before it can start
+                            # another turn - so the line is a crossing, not a level reading
 TOTAL_TURNS = 12
 
 # Parking lot: only avoided, never entered (touching its limitations ends the round, rule 9.24.7)
@@ -305,6 +311,8 @@ def main():
     t = 0
     l_turn = r_turn = False
     line_cooldown_until = 0.0
+    line_last_seen = 0.0                   # so a line already in view cannot re-trigger
+    turn_started = 0.0
     prev_diff = 0
     prev_error = 0
     error = 0
@@ -429,6 +437,7 @@ def main():
                 drive.drive(0, SERVO_CENTER, force=True)
                 time.sleep(0.1)
                 last_reverse_end = time.time()
+                line_last_seen = last_reverse_end   # blind during the escape: do not re-arm
                 reverse_ready_at = last_reverse_end + REVERSE_COOLDOWN
                 dodge_until = last_reverse_end + DODGE_TIME
                 print(f"[BLOCK] {'clear' if cleared else 'still there'} after "
@@ -444,11 +453,14 @@ def main():
                 if turn_dir != "none":
                     print(f"[DIR] First line -> direction {turn_dir.upper()}")
 
-            t_signal = False
-            if now >= line_cooldown_until and (
-                    (turn_dir == "right" and orange_area > LINE_MIN_AREA) or
-                    (turn_dir == "left" and blue_area > LINE_MIN_AREA)):
-                t_signal = True
+            # `line_now` is the line being in the box. A turn starts on the car CROSSING it,
+            # and only after the line has been out of the box for a while: standing still
+            # over a line is one crossing, not a hundred.
+            line_now = ((turn_dir == "right" and orange_area > LINE_MIN_AREA) or
+                        (turn_dir == "left" and blue_area > LINE_MIN_AREA))
+            if (line_now and now >= line_cooldown_until and now >= dodge_until
+                    and now - line_last_seen >= LINE_REARM_TIME):
+                turn_started = now
                 if turn_dir == "right":
                     r_turn = True
                 else:
@@ -456,9 +468,13 @@ def main():
                 if pillar.area != 0 and (
                         (left_area > 500 and turn_dir == "left") or (right_area > 500 and turn_dir == "right")):
                     corner_on = True
+            if line_now:
+                line_last_seen = now
 
             def end_turn(method):
                 nonlocal l_turn, r_turn, t, prev_error, prev_diff, line_cooldown_until, last_turn_time
+                if now - turn_started < TURN_MIN_TIME:
+                    return          # too quick to be a corner: stay in the turn
                 l_turn = r_turn = False
                 prev_error = prev_diff = 0
                 t += 1
@@ -473,7 +489,7 @@ def main():
                     angle = SERVO_CENTER - (a_diff * KP + (a_diff - prev_diff) * KD)
                     prev_diff = a_diff
                 else:
-                    if (l_turn or r_turn) and not t_signal:
+                    if (l_turn or r_turn) and not line_now:
                         end_turn("pillar")
                     error = pillar.target - pillar.x
                     angle = SERVO_CENTER - (error * c_kp + (error - prev_error) * c_kd)
@@ -498,7 +514,8 @@ def main():
                     angle = SHARP_RIGHT
 
                 # turn exit by wall, and default turn angles when no pillar is in view
-                if ((r_turn and right_area >= EXIT_THRESH) or (l_turn and left_area >= EXIT_THRESH)) and not t_signal:
+                if ((r_turn and right_area >= EXIT_THRESH)
+                        or (l_turn and left_area >= EXIT_THRESH)) and not line_now:
                     end_turn("wall")
                 if r_turn and pillar.area == 0 and right_area < 5000:
                     angle = SHARP_RIGHT
