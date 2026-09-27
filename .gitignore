@@ -1,29 +1,36 @@
-# Image formats & photo directories
-*.jpg
-*.jpeg
-*.png
-*.gif
-*.bmp
-*.webp
-*.tiff
-*.ico
+# ROBOVANGUARD - WRO Future Engineers 2026
+# Only my_project_new/ is ours. Everything below is either someone else's work,
+# a local backup, or something the tools generate on the Pi.
 
-# Photo directories
-v-photos/
-t-photos/
-other/extra images/
-**/extra images/
+# Other teams' repositories, kept locally for reference only
+canada-team/
+turkey-team/
 
-# Python & Environment
+# Local backups and scratch copies
+_backup_before_camera_only/
+*_backup/
+*.bak
+
+# Written on the Pi by the test/tuning tools - machine specific, never shared
+camera_config.json
+roi_config.json
+roi_view.jpg
+fov_*.jpg
+colour_*.jpg
+
+# Editor / IDE
+.theia/
+.vscode/
+.idea/
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
 
-# OS & IDE junk
+# OS
 .DS_Store
 Thumbs.db
-*.swp
-.idea/
-.vscode/
+desktop.ini
