@@ -19,7 +19,7 @@ Usage
       python3 tune_rois.py --narrow     # tune the 4:3 capture instead
 
 Controls
-  1..5        pick a box (the selected one is drawn thick and white)
+  1..6        pick a box (the selected one is drawn thick and white)
   arrows      move the box            (or W A S D)
   I / K       shorter / taller        (bottom edge)
   J / L       narrower / wider        (right edge)
@@ -41,6 +41,11 @@ What to aim for
   pillar      The area ahead where traffic signs appear. Wide is fine.
   floor       Directly ahead, near the car: floor lines and the magenta parking lot.
   corner      A small patch straight ahead, used only to sharpen tight corners.
+  bumper      A box at the very bottom, covering what the wheels are about to reach. A
+              traffic sign at contact range is BELOW the pillar box, so this is the only
+              thing that still sees it. It must read 0 on clear track and fill as a sign
+              comes within a few centimetres. Compare with BUMPER_BLOCK_AREA in
+              obstacle_challenge_R2.py.
   front       A narrow box at the very bottom: what the car is about to drive into.
               It should read near 0 on open track and fill with black only when a wall
               is close ahead. Compare with FRONT_BLOCK_AREA in open_challenge_R1.py.
@@ -76,20 +81,22 @@ DEFAULTS = {
                  "right": (0.66, 0.36, 1.00, 0.58),
                  "pillar": (0.00, 0.20, 1.00, 0.72),
                  "floor": (0.33, 0.62, 0.67, 0.80),
-                 "corner": (0.44, 0.24, 0.56, 0.30)},
+                 "corner": (0.44, 0.24, 0.56, 0.30),
+                 "bumper": (0.28, 0.72, 0.72, 0.99)},
         "narrow": {"left": (0.000, 0.365, 0.516, 0.552),
                    "right": (0.516, 0.365, 1.000, 0.552),
                    "pillar": (0.094, 0.250, 0.906, 0.719),
                    "floor": (0.313, 0.542, 0.688, 0.646),
-                   "corner": (0.422, 0.250, 0.578, 0.292)},
+                   "corner": (0.422, 0.250, 0.578, 0.292),
+                   "bumper": (0.300, 0.700, 0.700, 0.990)},
     },
 }
 
 COLOURS = {"left": (0, 255, 255), "right": (0, 255, 255), "line": (255, 255, 0),
            "pillar": (255, 204, 0), "floor": (255, 0, 255), "corner": (0, 0, 255),
-           "front": (0, 0, 255)}
+           "front": (0, 0, 255), "bumper": (0, 128, 255)}
 
-WINDOW = "ROI tuner  -  1..5 pick   arrows move   IJKL resize   O save   Q quit"
+WINDOW = "ROI tuner  -  1..6 pick   arrows move   IJKL resize   O save   Q quit"
 
 
 def parse_args():
@@ -113,7 +120,7 @@ def measure(img, name, box, area):
         b = int(max_contour(contours_of(blue_mask(hsv, lab), 60), box)[0] * area)
         m = int(max_contour(contours_of(magenta_mask(lab), 60), box)[0] * area)
         return "O/B/M", f"{o}/{b}/{m}"
-    if name == "pillar":
+    if name in ("pillar", "bumper"):
         r = int(max_contour(contours_of(red_mask(hsv), 60), box)[0] * area)
         g = int(max_contour(contours_of(green_mask(hsv), 60), box)[0] * area)
         return "R/G", f"{r}/{g}"
@@ -160,7 +167,7 @@ def main():
     dirty = False
     print(f"[TUNER] {fw}x{fh} ({'16:9' if wide else '4:3'}), round {args.round}. "
           f"Boxes: {', '.join(names)}")
-    print("[TUNER] 1..5 pick, arrows/WASD move, IJKL resize, [ ] step, R reset, O/Enter save, Q quit")
+    print("[TUNER] 1..6 pick, arrows/WASD move, IJKL resize, [ ] step, R reset, O/Enter save, Q quit")
 
     try:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
@@ -196,7 +203,7 @@ def main():
         ch = chr(k).lower() if 32 <= k < 127 else ""
         x1, y1, x2, y2 = rois[names[selected]]
 
-        if ch in "12345" and int(ch) <= len(names):
+        if ch in "123456" and int(ch) <= len(names):
             selected = int(ch) - 1
             continue
         if ch == "q" or k == 27:

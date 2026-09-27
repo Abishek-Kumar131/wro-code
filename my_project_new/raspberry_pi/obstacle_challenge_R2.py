@@ -70,6 +70,7 @@ ROIS_43 = {
     "pillar": (0.094, 0.250, 0.906, 0.719),
     "floor":  (0.313, 0.542, 0.688, 0.646),
     "corner": (0.422, 0.250, 0.578, 0.292),
+    "bumper": (0.300, 0.700, 0.700, 0.990),
 }
 # Wide defaults sit further out and are taller than the 4:3 ones: a wide lens puts the
 # side walls near the edges of the frame. Starting point only - set them on the real
@@ -80,6 +81,7 @@ ROIS_WIDE = {
     "pillar": (0.00, 0.20, 1.00, 0.72),
     "floor":  (0.33, 0.62, 0.67, 0.80),
     "corner": (0.44, 0.24, 0.56, 0.30),
+    "bumper": (0.28, 0.72, 0.72, 0.99),
 }
 
 # Steering. On this car 60 = full left, 100 = straight, 140 = full right.
@@ -97,6 +99,13 @@ RED_MIN_AREA = 150
 GREEN_MIN_AREA = 200
 PILLAR_PREFILTER_AREA = 100
 RED_TOO_CLOSE, GREEN_TOO_CLOSE = 6500, 8000     # reverse if a pillar this big is right ahead
+# At contact range a sign is BELOW the pillar ROI, so its area there stops growing and can
+# even fall back to zero - the car went blind exactly when it was about to hit something.
+# The bumper box sits under the pillar box and watches what the car is driving into. Any
+# sign-coloured mass this big in it counts as a block ahead, whatever the pillar box says.
+BUMPER_BLOCK_AREA = 2500
+PILLAR_SLOW_AREA = 3500     # ease off the throttle once a sign is this big: a slower bump
+                            # draws far less stall current than a full-speed one
 RED_SKIP_WALL, GREEN_SKIP_WALL = 11500, 12000   # ignore pillars while a wall fills its ROI this much
 
 # Turns
@@ -218,6 +227,24 @@ def find_pillar(contours, target, colour, best, roi, ctx):
     return count, too_close
 
 
+def bumper_block(img, roi, geom, frac=1.0):
+    """
+    Anything sign-coloured filling the box right in front of the wheels.
+
+    Everything in this box is by definition in the car's path, so there is no x test and
+    no distance test - unlike close_pillar, which is looking further out.
+    Returns (area, side): red is passed on its right, green on its left.
+    """
+    hsv, _ = roi_hsv_lab(img, roi)
+    limit = BUMPER_BLOCK_AREA * frac
+    worst, side = 0, None
+    for colour, mask in (("red", red_mask(hsv)), ("green", green_mask(hsv))):
+        area = int(max_contour(contours_of(mask, PILLAR_PREFILTER_AREA), roi)[0] * geom["area"])
+        if area > limit and area > worst:
+            worst, side = area, "right" if colour == "red" else "left"
+    return worst, side
+
+
 def close_pillar(img, roi, geom, frac=1.0):
     """
     Is a traffic sign right in front of the bumper?
@@ -305,6 +332,7 @@ def main():
     red_target, green_target = RED_TARGET, GREEN_TARGET
     roi_pillar = roi_px(rois["pillar"], FRAME_W, FRAME_H)
     roi_floor = roi_px(rois["floor"], FRAME_W, FRAME_H)
+    roi_bumper = roi_px(rois["bumper"], FRAME_W, FRAME_H)
     corner_on = False
 
     turn_dir = args.dir or "none"
@@ -401,6 +429,10 @@ def main():
 
             # ---------------------------------------------------------- block right ahead
             close_area, close_side = close_pillar(img, roi_pillar, GEOM)
+            bump_area, bump_side = bumper_block(img, roi_bumper, GEOM)
+            if bump_area and not close_area:
+                # too close for the pillar box to see it at all
+                close_area, close_side = bump_area, bump_side
             if close_area and now >= reverse_ready_at:
                 if now - last_reverse_end > REVERSE_STREAK_WINDOW:
                     reverse_streak = 0
@@ -431,7 +463,8 @@ def main():
                     f_rev = camera.capture_array()
                     if f_rev is None:
                         continue
-                    if close_pillar(f_rev, roi_pillar, GEOM, REVERSE_CLEAR_FRAC)[0] == 0:
+                    if (close_pillar(f_rev, roi_pillar, GEOM, REVERSE_CLEAR_FRAC)[0] == 0
+                            and bumper_block(f_rev, roi_bumper, GEOM, REVERSE_CLEAR_FRAC)[0] == 0):
                         cleared = True
                         break
                 drive.drive(0, SERVO_CENTER, force=True)
@@ -547,7 +580,10 @@ def main():
                 break
 
             prev_error = error
-            speed_now = DODGE_SPEED if now < dodge_until else speed   # ease past a block
+            # Ease off for anything close: a slow nudge is a bump, a fast one is a stall,
+            # and a stalled motor is what browns the ESP32 out.
+            speed_now = (DODGE_SPEED if (now < dodge_until or bump_area
+                                         or pillar.area > PILLAR_SLOW_AREA) else speed)
             drive.drive(0 if args.steer_only else speed_now, angle)
 
             if link.link_ok != link_was_ok:
@@ -572,6 +608,8 @@ def main():
 
             if show:
                 disp = img.copy()
+                cv2.rectangle(disp, (roi_bumper[0], roi_bumper[1]), (roi_bumper[2], roi_bumper[3]),
+                              (0, 0, 255) if bump_area else (120, 120, 120), 2)
                 for roi, col in ((ROI_LEFT, (0, 255, 255)), (ROI_RIGHT, (0, 255, 255)),
                                  (roi_pillar, (255, 204, 0)), (roi_floor, (255, 0, 255))):
                     draw_roi(disp, roi, col)

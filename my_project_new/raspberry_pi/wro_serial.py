@@ -52,9 +52,15 @@ class WROSerialController:
 
     HEARTBEAT_TIMEOUT = 1.5     # s without any line from the ESP32 -> link considered unhealthy
     MAX_SOFT_READ_ERRORS = 25   # transient read glitches in a row before actually reconnecting
+    # The firmware streams US:/HB: every 100 ms, so an open port that has gone completely
+    # silent means the ESP32 is hung or browned out - not idle. That state used to need
+    # someone to restart the board by hand in the middle of a run. Pulsing DTR/RTS drives
+    # the board's own USB auto-reset circuit, which is exactly what unplugging it does.
+    RX_SILENCE_RESET = 1.5      # s of silence on a healthy-looking port = the board is dead
+    RESET_MIN_INTERVAL = 3.0    # s between reset pulses, so it cannot pulse in a loop
 
     def __init__(self, port: Optional[str] = None, baudrate: int = 115200, timeout: float = 0.05,
-                 auto_connect: bool = True, verbose: bool = False):
+                 auto_connect: bool = True, auto_reset: bool = True, verbose: bool = False):
         self.requested_port = None if port in (None, "", "AUTO") else port
         self.port: Optional[str] = None
         self.baudrate = baudrate
@@ -76,7 +82,9 @@ class WROSerialController:
         self._boot_times = []
         self._reboot_storm_warned = False
         self._last_boot_log = 0.0
-        self.stats = {"disconnects": 0, "reconnects": 0, "esp_reboots": 0,
+        self.auto_reset = auto_reset
+        self._last_reset = 0.0
+        self.stats = {"disconnects": 0, "reconnects": 0, "esp_reboots": 0, "reset_pulses": 0,
                       "failsafe_stops": 0, "dropped_writes": 0, "last_reset_reason": None,
                       "us_lines": 0, "read_glitches": 0}
         self._soft_read_errors = 0
@@ -136,6 +144,34 @@ class WROSerialController:
             self._need_reopen = False
         self.last_rx_time = time.time()
         return True
+
+    def _pulse_reset(self):
+        """
+        Reboot the ESP32 by driving its reset line, the way esptool does a hard reset:
+        RTS high holds EN low, releasing it lets the board boot the firmware again.
+
+        Only works on boards with the usual CH340/CP210x auto-reset circuit. If yours has
+        not got one, nothing happens and the log keeps reporting silence - and then the
+        cause is the power supply, not the link.
+        """
+        ser = self.serial_conn
+        if ser is None:
+            return
+        self._last_reset = time.time()
+        self.stats["reset_pulses"] += 1
+        _log(f"No telemetry for {self.RX_SILENCE_RESET:.1f}s: the ESP32 is not running. "
+             f"Pulsing its reset line (pulse {self.stats['reset_pulses']}). "
+             f"If this keeps happening, the board is browning out - check the motor supply.")
+        try:
+            with self._write_lock:
+                ser.dtr = False      # IO0 high: boot the firmware, not the bootloader
+                ser.rts = True       # EN low: hold the chip in reset
+                time.sleep(0.12)
+                ser.rts = False      # EN high: run
+            # Do not judge it silent again until it has had time to boot and speak
+            self.last_rx_time = time.time()
+        except (serial.SerialException, OSError) as e:
+            _log(f"Could not pulse the reset line: {e}")
 
     def _close(self):
         with self._write_lock:
@@ -273,6 +309,11 @@ class WROSerialController:
 
             was_connected = True
             ser = self.serial_conn
+
+            # An open port with nothing coming out of it: reboot the board
+            if (self.auto_reset and time.time() - self.last_rx_time > self.RX_SILENCE_RESET
+                    and time.time() - self._last_reset > self.RESET_MIN_INTERVAL):
+                self._pulse_reset()
 
             # Only ever read when bytes are actually waiting. A blocking read on an idle
             # port makes CH340 adapters raise "device reports readiness to read but
