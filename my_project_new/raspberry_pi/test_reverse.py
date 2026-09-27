@@ -32,6 +32,9 @@ Usage
   python3 test_reverse.py --seconds 3     longer phases
   python3 test_reverse.py --pins          drive each motor pin on its own, to find which
                                           half is dead (needs the PINTEST firmware)
+  python3 test_reverse.py --from-motion   reverse straight out of forward motion, with no
+                                          stop first - what the R1 manoeuvre really does
+  python3 test_reverse.py --kick 150      break away from a standstill at full duty first
 
 Check the wiring FIRST, before running anything
   A plain BO / brushed motor needs no reverse pin: reversing it means swapping plus and
@@ -86,6 +89,10 @@ def parse_args():
     p.add_argument("--ramp", action="store_true", help="step through several duties instead")
     p.add_argument("--pins", action="store_true",
                    help="drive each motor pin on its own (needs the PINTEST firmware)")
+    p.add_argument("--from-motion", dest="from_motion", action="store_true",
+                   help="reverse straight out of forward motion, with no stop in between")
+    p.add_argument("--kick", type=int, default=0, metavar="MS",
+                   help="start the reverse at full duty for this many ms to break away")
     p.add_argument("--port", default=None, help="serial port (default: auto-detect)")
     p.add_argument("--yes", action="store_true", help="skip the wheels-off-the-ground prompt")
     return p.parse_args()
@@ -97,12 +104,19 @@ class Phase:
     def __init__(self, link, label, speed, seconds, command=None):
         self.link, self.label, self.speed, self.seconds = link, label, speed, seconds
         self.command = command or f"DRIVE:{speed}:{SERVO_CENTER}"
+        self.kick_ms = getattr(Phase, "kick_default", 0)
 
     def run(self):
         before = dict(self.link.stats)
         print(f"\n  {self.label:28s} {self.command}  for {self.seconds:.1f}s")
         end = time.time() + self.seconds
         sent = 0
+        if self.kick_ms and self.speed < 0:
+            print(f"  {'':28s} breaking away at full duty for {self.kick_ms} ms first")
+            kick_end = time.time() + self.kick_ms / 1000.0
+            while time.time() < kick_end:
+                self.link.send_command(f"DRIVE:-255:{SERVO_CENTER}")
+                time.sleep(0.02)
         while time.time() < end:
             # resend continuously: the firmware stops the motor if nothing arrives for 500 ms
             if self.link.send_command(self.command):
@@ -147,7 +161,34 @@ def main():
     time.sleep(0.6)                      # let the first telemetry and any BOOT: line arrive
     print(f"[LINK] Connected on {link.port}. Reset reason: {link.stats['last_reset_reason']}")
 
+    Phase.kick_default = args.kick     # applies to every reverse phase below
     trouble = []
+    if args.from_motion:
+        # Reverse with no stop phase in between. If this moves the car and the plain test
+        # does not, the drive is wired correctly and the problem is breaking away from a
+        # standstill - try --kick, and see REVERSE_KICK_TIME in obstacle_challenge_R2.py.
+        print(f"\n=== reverse straight out of forward motion " + "=" * 18)
+        try:
+            trouble += Phase(link, f"FORWARD  {args.speed}", args.speed, args.seconds).run()
+            trouble += Phase(link, f"REVERSE  -{args.speed} (no stop)", -args.speed,
+                             args.seconds).run()
+        except KeyboardInterrupt:
+            print(f"\n[STOP] Interrupted.")
+        finally:
+            for _ in range(10):
+                link.send_command(f"DRIVE:0:{SERVO_CENTER}")
+                time.sleep(0.02)
+            time.sleep(0.2)
+            print(f"\n[STATS] {link.stats}")
+            link.disconnect()
+        print(f"\n" + "=" * 62)
+        print("  it reversed this time, but not from a standstill .. the wiring is fine. The")
+        print("      motor cannot break away backwards from rest. Use --kick 150 to confirm,")
+        print("      and REVERSE_KICK_TIME in obstacle_challenge_R2.py does this during a run.")
+        print("  it did not reverse either way ..................... back to --pins: nothing")
+        print("      is driving the motor the other way at all.")
+        return 0
+
     if args.pins:
         # Isolate the two halves. motor_forward/backward always write both pins, so they
         # cannot tell a dead GPIO from a dead driver channel; PINTEST drives one at a time.

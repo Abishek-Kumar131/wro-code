@@ -143,6 +143,15 @@ REVERSE_MAX_TIME = 1.0      # s: hard cap on one attempt (stops it reversing int
 REVERSE_ESCALATE = 1.6      # multiply that cap on a repeat attempt
 REVERSE_CLEAR_FRAC = 0.55   # "clear" = the block shrank to this fraction of the too-close area
 REVERSE_STEER = 15          # deg of counter-steer on a repeat, to come out aimed past it
+# The escape always reverses from a standstill, usually pressed against the thing it is
+# escaping - the hardest possible start. Reverse out of forward motion breaks away easily
+# (which is why the R1 manoeuvre works), but from rest the gearbox stiction can swallow
+# 230/255 completely and the car just sits there. So start every escape at full duty for a
+# moment, then settle to REVERSE_SPEED. Check the real figure with:
+#     python3 test_reverse.py --from-motion        (does it reverse out of motion?)
+#     python3 test_reverse.py --kick 150           (does a full-duty kick start it from rest?)
+REVERSE_KICK_SPEED = -255   # full duty, just to break away
+REVERSE_KICK_TIME = 0.15    # s of it before settling to REVERSE_SPEED
 REVERSE_STREAK_WINDOW = 3.0  # s: another reverse within this counts as the same jam
 REVERSE_COOLDOWN = 0.5      # s before another reverse may start
 DODGE_TIME = 1.3            # s of holding the steering that goes round the block
@@ -459,7 +468,9 @@ def main():
                 while time.time() - t_rev < limit:
                     # force=True resends every frame, so a dropped line or a reconnect
                     # cannot leave the car standing still on the ESP32 failsafe mid-escape
-                    drive.drive(REVERSE_SPEED, back_angle, force=True)
+                    kicking = time.time() - t_rev < REVERSE_KICK_TIME
+                    drive.drive(REVERSE_KICK_SPEED if kicking else REVERSE_SPEED,
+                                back_angle, force=True)
                     f_rev = camera.capture_array()
                     if f_rev is None:
                         continue
