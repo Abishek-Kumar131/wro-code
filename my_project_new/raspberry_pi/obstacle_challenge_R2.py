@@ -118,7 +118,19 @@ BRAKE_SPEED = -180
 # Speed (PWM 0-255). This motor stalls below ~220.
 SPEED = 225
 REVERSE_SPEED = -230
-REVERSE_COOLDOWN = 1.0
+DODGE_SPEED = 215           # slower while going round a block that was right in front
+# Backing away from a block too close to steer round.
+# This is closed loop: it reverses until the block has really shrunk out of the way, not
+# for a fixed time. A fixed short reverse followed by a cooldown of full-speed forward was
+# why the car appeared to freeze nose-to-nose with a block: it undid its own escape, crept
+# forward again, and stalled against it.
+REVERSE_MAX_TIME = 1.0      # s: hard cap on one attempt (stops it reversing into a wall)
+REVERSE_ESCALATE = 1.6      # multiply that cap on a repeat attempt
+REVERSE_CLEAR_FRAC = 0.55   # "clear" = the block shrank to this fraction of the too-close area
+REVERSE_STEER = 15          # deg of counter-steer on a repeat, to come out aimed past it
+REVERSE_STREAK_WINDOW = 3.0  # s: another reverse within this counts as the same jam
+REVERSE_COOLDOWN = 0.5      # s before another reverse may start
+DODGE_TIME = 1.3            # s of holding the steering that goes round the block
 START_DELAY = 0.5
 
 WINDOW = "WRO R2 Obstacle Challenge"
@@ -200,6 +212,37 @@ def find_pillar(contours, target, colour, best, roi, ctx):
     return count, too_close
 
 
+def close_pillar(img, roi, geom, frac=1.0):
+    """
+    Is a traffic sign right in front of the bumper?
+
+    Returns (area, side) for the worst offender, or (0, None). `side` is the way the car
+    has to go to get round it: red is passed on its right, green on its left.
+
+    Deliberately separate from find_pillar: that one throws away pillars sitting low in
+    the ROI or hidden behind a big wall reading, which is exactly what a block about to
+    be hit looks like - so it reports P=0 for the very thing in the way. `frac` lowers the
+    bar, so backing away can stop on a smaller area than the one that triggered it.
+    """
+    hsv, _ = roi_hsv_lab(img, roi)
+    worst, side = 0, None
+    for colour, contours, limit in (
+            ("red", contours_of(red_mask(hsv), PILLAR_PREFILTER_AREA, PILLAR_RED_MIN_ASPECT),
+             RED_TOO_CLOSE * frac),
+            ("green", contours_of(green_mask(hsv), PILLAR_PREFILTER_AREA, PILLAR_GREEN_MIN_ASPECT),
+             GREEN_TOO_CLOSE * frac)):
+        for cnt in contours:
+            area = cv2.contourArea(cnt) * geom["area"]
+            if area <= limit or area <= worst:
+                continue
+            x, _, w, _ = cv2.boundingRect(cnt)
+            x += roi[0] + w // 2
+            in_path = (x >= geom["red_min_x"]) if colour == "red" else (x <= geom["green_max_x"])
+            if in_path:
+                worst, side = int(area), "right" if colour == "red" else "left"
+    return worst, side
+
+
 def main():
     args = parse_args()
     show = not args.no_display
@@ -270,6 +313,10 @@ def main():
     finish_at = None
     last_turn_time = 0.0
     reverse_ready_at = 0.0
+    last_reverse_end = 0.0
+    reverse_streak = 0                     # repeats of the same jam, to escalate the escape
+    dodge_until = 0.0                      # hold the steering that goes round the block
+    dodge_dir = None
     link_was_ok = True
     exit_reason = "unknown"
 
@@ -287,13 +334,7 @@ def main():
     t_start = time.time()
     last_status = 0.0
     speed = 0 if args.steer_only else SPEED
-    print(f"[GO] Driving. Parking after {args.turns} turns. Direction: {turn_dir.upper()}")
-
-    def tick():
-        camera.capture_array()   # keep frames fresh during blocking manoeuvres
-
-    def hold(spd, ang, seconds):
-        drive.hold(0 if args.steer_only else spd, ang, seconds, tick)
+    print(f"[GO] Driving. Stopping after {args.turns} turns. Direction: {turn_dir.upper()}")
 
     try:
         while True:
@@ -347,14 +388,51 @@ def main():
             ctx["end_const"] = end_const
 
             pillar = Pillar()
-            _, close_g = find_pillar(c_green, green_target, "green", pillar, roi_pillar, ctx)
-            _, close_r = find_pillar(c_red, red_target, "red", pillar, roi_pillar, ctx)
+            find_pillar(c_green, green_target, "green", pillar, roi_pillar, ctx)
+            find_pillar(c_red, red_target, "red", pillar, roi_pillar, ctx)
 
-            if (close_g or close_r) and now >= reverse_ready_at:
-                print(f"[PILLAR] Too close (area {max(close_g, close_r)}) -> reversing")
-                hold(0, SERVO_CENTER, 0.1)
-                hold(REVERSE_SPEED, SERVO_CENTER, 0.5)
-                reverse_ready_at = time.time() + REVERSE_COOLDOWN
+            # ---------------------------------------------------------- block right ahead
+            close_area, close_side = close_pillar(img, roi_pillar, GEOM)
+            if close_area and now >= reverse_ready_at:
+                if now - last_reverse_end > REVERSE_STREAK_WINDOW:
+                    reverse_streak = 0
+                reverse_streak += 1
+                if close_side:
+                    dodge_dir = close_side
+                # Reversing with the wheels turned one way swings the nose the other way,
+                # so counter-steer to come out of it aimed past the block. Straight back on
+                # the first attempt: that cannot put the car anywhere new.
+                back_angle = SERVO_CENTER
+                if reverse_streak >= 2 and dodge_dir in ("left", "right"):
+                    lean = -REVERSE_STEER if dodge_dir == "right" else REVERSE_STEER
+                    # every other attempt swings the wheels the other way: a wiggle breaks
+                    # a jam that simply repeating the same move cannot
+                    back_angle += lean if reverse_streak % 2 == 0 else -lean
+                limit = REVERSE_MAX_TIME * (REVERSE_ESCALATE if reverse_streak >= 2 else 1.0)
+                print(f"\n[BLOCK] {close_side or 'pillar'} {close_area}px right ahead "
+                      f"(attempt {reverse_streak}) -> reverse at {back_angle} for up to "
+                      f"{limit:.1f}s, then go {dodge_dir or 'by the walls'}")
+                drive.drive(0, SERVO_CENTER, force=True)
+                time.sleep(0.12)                 # let the gearbox stop before it reverses
+                t_rev = time.time()
+                cleared = False
+                while time.time() - t_rev < limit:
+                    # force=True resends every frame, so a dropped line or a reconnect
+                    # cannot leave the car standing still on the ESP32 failsafe mid-escape
+                    drive.drive(REVERSE_SPEED, back_angle, force=True)
+                    f_rev = camera.capture_array()
+                    if f_rev is None:
+                        continue
+                    if close_pillar(f_rev, roi_pillar, GEOM, REVERSE_CLEAR_FRAC)[0] == 0:
+                        cleared = True
+                        break
+                drive.drive(0, SERVO_CENTER, force=True)
+                time.sleep(0.1)
+                last_reverse_end = time.time()
+                reverse_ready_at = last_reverse_end + REVERSE_COOLDOWN
+                dodge_until = last_reverse_end + DODGE_TIME
+                print(f"[BLOCK] {'clear' if cleared else 'still there'} after "
+                      f"{last_reverse_end - t_rev:.2f}s of reverse")
                 continue
 
             # ---------------------------------------------------------- floor lines / turns
@@ -427,6 +505,13 @@ def main():
                 elif l_turn and pillar.area == 0 and left_area < 5000:
                     angle = SHARP_LEFT
 
+            # Just backed away from a block: hold the steering that goes round it. Without
+            # this the block is usually too close to be tracked (P reads 0) and the wall PD
+            # drives straight back into it - the other half of the freeze.
+            if now < dodge_until and dodge_dir in ("left", "right") and (
+                    lot_left_area <= LOT_AVOID_AREA and lot_right_area <= LOT_AVOID_AREA):
+                angle = SHARP_LEFT if dodge_dir == "left" else SHARP_RIGHT
+
             angle = int(max(SHARP_LEFT, min(SHARP_RIGHT, angle)))
 
             # ------------------------------------------------ finish (no parking)
@@ -445,7 +530,8 @@ def main():
                 break
 
             prev_error = error
-            drive.drive(0 if args.steer_only else speed, angle)
+            speed_now = DODGE_SPEED if now < dodge_until else speed   # ease past a block
+            drive.drive(0 if args.steer_only else speed_now, angle)
 
             if link.link_ok != link_was_ok:
                 link_was_ok = link.link_ok
@@ -454,6 +540,8 @@ def main():
             # ---------------------------------------------------------- debug output
             if finish_at is not None:
                 state = "FINISHING"
+            elif now < dodge_until and dodge_dir:
+                state = f"DODGE-{dodge_dir[0].upper()}"
             elif pillar.area:
                 state = "PILLAR-R" if pillar.target == RED_TARGET else "PILLAR-G"
             else:
