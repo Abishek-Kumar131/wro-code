@@ -39,6 +39,9 @@ What to aim for
   line        Where the orange/blue floor lines cross, close enough to the car that the
               line is clearly inside the box when a corner is reached.
   pillar      The area ahead where traffic signs appear. Wide is fine.
+              The numbers read R/G/M. Point the car at the magenta parking lot: it should
+              read all M and no R. If it reads R there, that is the "giant red block" -
+              tell me the numbers and I will move MAGENTA_RED_SPLIT in masks.py.
   floor       Directly ahead, near the car: floor lines and the magenta parking lot.
   corner      A small patch straight ahead, used only to sharpen tight corners.
   bumper      A box at the very bottom, covering what the wheels are about to reach. A
@@ -118,12 +121,15 @@ def measure(img, name, box, area):
     if name in ("line", "floor"):
         o = int(max_contour(contours_of(orange_mask(hsv, lab), 60), box)[0] * area)
         b = int(max_contour(contours_of(blue_mask(hsv, lab), 60), box)[0] * area)
-        m = int(max_contour(contours_of(magenta_mask(lab), 60), box)[0] * area)
+        m = int(max_contour(contours_of(magenta_mask(lab, hsv), 60), box)[0] * area)
         return "O/B/M", f"{o}/{b}/{m}"
     if name in ("pillar", "bumper"):
-        r = int(max_contour(contours_of(red_mask(hsv), 60), box)[0] * area)
+        r = int(max_contour(contours_of(red_mask(hsv, lab), 60), box)[0] * area)
         g = int(max_contour(contours_of(green_mask(hsv), 60), box)[0] * area)
-        return "R/G", f"{r}/{g}"
+        # magenta too: point the car at the parking lot and it should read all M, no R.
+        # Any R on the lot is the fault that makes the car see a giant red sign there.
+        m = int(max_contour(contours_of(magenta_mask(lab, hsv), 60), box)[0] * area)
+        return "R/G/M", f"{r}/{g}/{m}"
     if name in ("corner", "front"):
         return "wall", int(max_contour(contours_of(wall_mask(hsv, lab), 50), box)[0] * area)
     return "", 0

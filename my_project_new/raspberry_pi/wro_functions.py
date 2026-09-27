@@ -406,11 +406,18 @@ def blue_mask(hsv, lab):
     return cv2.GaussianBlur(mask, (5, 5), 0)
 
 
-def red_mask(hsv):
+def red_mask(hsv, lab=None):
+    """
+    Red traffic signs. Pass `lab` as well wherever you have it: red and magenta share the
+    same hues once white balance has had its way, and only LAB b* tells them apart, so
+    without it the magenta parking lot can come back as one huge red sign.
+    """
     mask = _in(hsv, M.PILLAR_RED_HSV[0])
     for rng in M.PILLAR_RED_HSV[1:]:
         mask = cv2.bitwise_or(mask, _in(hsv, rng))
     mask = cv2.bitwise_and(mask, cv2.bitwise_not(_in(hsv, M.PILLAR_RED_EXCLUDE_ORANGE_HSV)))
+    if lab is not None:
+        mask = cv2.bitwise_and(mask, _in(lab, M.PILLAR_RED_LAB))
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL5)
 
 
@@ -418,8 +425,15 @@ def green_mask(hsv):
     return cv2.morphologyEx(_in(hsv, M.PILLAR_GREEN_HSV), cv2.MORPH_CLOSE, KERNEL5)
 
 
-def magenta_mask(lab):
-    mask = cv2.GaussianBlur(_in(lab, rMagenta), (7, 7), 0)
+def magenta_mask(lab, hsv=None):
+    """
+    The magenta parking lot. Pass `hsv` too where you have it: it only keeps the blue floor
+    line out, which sits close to the a* floor but nowhere near magenta in hue.
+    """
+    mask = _in(lab, M.LOT_MAGENTA_LAB)
+    if hsv is not None:
+        mask = cv2.bitwise_and(mask, _in(hsv, M.LOT_MAGENTA_HSV))
+    mask = cv2.GaussianBlur(mask, (7, 7), 0)
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL5)
 
 

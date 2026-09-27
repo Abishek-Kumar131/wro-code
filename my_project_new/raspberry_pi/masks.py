@@ -36,13 +36,30 @@ PILLAR_RED_HSV = [
     ([172, 120, 80], [180, 255, 255]),
 ]
 PILLAR_RED_EXCLUDE_ORANGE_HSV = ([9, 80, 80], [30, 255, 255])
+# A red pixel must ALSO be yellow-side in LAB. Red measures b* 157-195, magenta b* 67-108,
+# so this one condition stops the magenta parking lot being read as an enormous red sign.
+# Hue alone cannot do it: magenta drifts to 172+ under some white balance, straight into
+# the high red range above.
+MAGENTA_RED_SPLIT = 143     # b* below this is magenta-side, above is red-side
+PILLAR_RED_LAB = ([0, 0, MAGENTA_RED_SPLIT], [255, 255, 255])
+# A sign is a 50 mm pillar. If a red or green blob spans more of the pillar ROI than this
+# it is scenery - most often the parking lot, when white balance has pushed its magenta
+# far enough to the red side that no colour rule can reject it.
+PILLAR_MAX_WIDTH_FRAC = 0.45
 PILLAR_RED_MIN_ASPECT = 0.65    # bounding-box height / width; pillars are tall blocks
 
 PILLAR_GREEN_HSV = ([35, 60, 50], [85, 255, 255])
 PILLAR_GREEN_MIN_ASPECT = 0.60
 
 # ---------------------------------------------------------------- parking lot (magenta)
-rMagenta = [[0, 171, 106], [255, 195, 135]]   # LAB
+# Magenta must match BOTH ranges. LAB does the real work - a* well red-side and b* well
+# blue-side - which is what distinguishes it from red (b* 157+) and from orange (b* ~198).
+# The hue gate only keeps the blue floor line out: blue reads a* 150, uncomfortably close
+# to the a* floor here, but its hue is ~108, nowhere near magenta's 150-175.
+LOT_MAGENTA_HSV = ([130, 50, 40], [180, 255, 255])
+LOT_MAGENTA_LAB = ([0, 160, 0], [255, 255, MAGENTA_RED_SPLIT])
+
+rMagenta = LOT_MAGENTA_LAB                    # legacy name, kept for older scripts
 lotType = "light"
 
 # ---------------------------------------------------------------- legacy LAB ranges

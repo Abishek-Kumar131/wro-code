@@ -41,7 +41,7 @@ import traceback
 
 import cv2
 
-from masks import PILLAR_GREEN_MIN_ASPECT, PILLAR_RED_MIN_ASPECT
+from masks import PILLAR_GREEN_MIN_ASPECT, PILLAR_MAX_WIDTH_FRAC, PILLAR_RED_MIN_ASPECT
 from wro_serial import WROSerialController, Drive
 from wro_functions import (CameraManager, FpsCounter, roi_hsv_lab, wall_mask, orange_mask, blue_mask,
                            red_mask, green_mask, magenta_mask, contours_of, max_contour,
@@ -219,6 +219,8 @@ def find_pillar(contours, target, colour, best, roi, ctx):
                 continue
 
         x, y, w, h = cv2.boundingRect(cnt)
+        if w > (roi[2] - roi[0]) * PILLAR_MAX_WIDTH_FRAC:
+            continue        # too wide to be a 50 mm sign: scenery, usually the parking lot
         x += roi[0] + w // 2
         y += roi[1] + h
         dist = round(math.dist([x * sx, y * sy], [320, 480]))
@@ -253,10 +255,10 @@ def bumper_block(img, roi, geom, frac=1.0):
     no distance test - unlike close_pillar, which is looking further out.
     Returns (area, side): red is passed on its right, green on its left.
     """
-    hsv, _ = roi_hsv_lab(img, roi)
+    hsv, lab = roi_hsv_lab(img, roi)
     limit = BUMPER_BLOCK_AREA * frac
     worst, side = 0, None
-    for colour, mask in (("red", red_mask(hsv)), ("green", green_mask(hsv))):
+    for colour, mask in (("red", red_mask(hsv, lab)), ("green", green_mask(hsv))):
         area = int(max_contour(contours_of(mask, PILLAR_PREFILTER_AREA), roi)[0] * geom["area"])
         if area > limit and area > worst:
             worst, side = area, "right" if colour == "red" else "left"
@@ -275,10 +277,10 @@ def close_pillar(img, roi, geom, frac=1.0):
     be hit looks like - so it reports P=0 for the very thing in the way. `frac` lowers the
     bar, so backing away can stop on a smaller area than the one that triggered it.
     """
-    hsv, _ = roi_hsv_lab(img, roi)
+    hsv, lab = roi_hsv_lab(img, roi)
     worst, side = 0, None
     for colour, contours, limit in (
-            ("red", contours_of(red_mask(hsv), PILLAR_PREFILTER_AREA, PILLAR_RED_MIN_ASPECT),
+            ("red", contours_of(red_mask(hsv, lab), PILLAR_PREFILTER_AREA, PILLAR_RED_MIN_ASPECT),
              RED_TOO_CLOSE * frac),
             ("green", contours_of(green_mask(hsv), PILLAR_PREFILTER_AREA, PILLAR_GREEN_MIN_ASPECT),
              GREEN_TOO_CLOSE * frac)):
@@ -287,6 +289,8 @@ def close_pillar(img, roi, geom, frac=1.0):
             if area <= limit or area <= worst:
                 continue
             x, _, w, _ = cv2.boundingRect(cnt)
+            if w > (roi[2] - roi[0]) * PILLAR_MAX_WIDTH_FRAC:
+                continue    # too wide to be a sign: scenery, usually the parking lot
             x += roi[0] + w // 2
             in_path = (x >= geom["red_min_x"]) if colour == "red" else (x <= geom["green_max_x"])
             if in_path:
@@ -402,8 +406,8 @@ def main():
             # ---------------------------------------------------------- vision
             hsv_l, lab_l = roi_hsv_lab(img, ROI_LEFT)
             hsv_r, lab_r = roi_hsv_lab(img, ROI_RIGHT)
-            mag_l = magenta_mask(lab_l)
-            mag_r = magenta_mask(lab_r)
+            mag_l = magenta_mask(lab_l, hsv_l)
+            mag_r = magenta_mask(lab_r, hsv_r)
             wall_l = wall_mask(hsv_l, lab_l)
             wall_r = wall_mask(hsv_r, lab_r)
             # magenta counts as wall so the car steers around the parking lot, never into it
@@ -421,15 +425,15 @@ def main():
             orange_area = int(max_contour(contours_of(orange_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0] * AREA)
             blue_area = int(max_contour(contours_of(blue_mask(hsv_f, lab_f), LINE_MIN_AREA), roi_floor)[0] * AREA)
 
-            hsv_p, _ = roi_hsv_lab(img, roi_pillar)
-            c_red = contours_of(red_mask(hsv_p), PILLAR_PREFILTER_AREA, PILLAR_RED_MIN_ASPECT)
+            hsv_p, lab_p = roi_hsv_lab(img, roi_pillar)
+            c_red = contours_of(red_mask(hsv_p, lab_p), PILLAR_PREFILTER_AREA, PILLAR_RED_MIN_ASPECT)
             c_green = contours_of(green_mask(hsv_p), PILLAR_PREFILTER_AREA, PILLAR_GREEN_MIN_ASPECT)
 
             corner_area = 0
             if corner_on:
                 hsv_c, lab_c = roi_hsv_lab(img, ROI_CORNER)
                 corner_area = int((max_contour(contours_of(wall_mask(hsv_c, lab_c), 50), ROI_CORNER)[0]
-                                   + max_contour(contours_of(magenta_mask(lab_c), 50), ROI_CORNER)[0]) * AREA)
+                                   + max_contour(contours_of(magenta_mask(lab_c, hsv_c), 50), ROI_CORNER)[0]) * AREA)
 
             # ---------------------------------------------------------- pillars
             ctx = dict(GEOM, left_area=left_area, right_area=right_area)
